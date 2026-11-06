@@ -2,7 +2,7 @@
 #
 # Air Defenders — Docker image.
 #
-# Pure-Go static binary on Chainguard's distroless static base. The Zenoh
+# Pure-Go static binary on the distroless runtime-static base. The Zenoh
 # publisher in zenoh.go talks to the router's REST plugin over plain HTTP
 # (pure stdlib net/http) so there is no CGO, no glibc requirement, and no
 # build-tag gating. Whether the publisher actually emits is decided at run
@@ -10,8 +10,13 @@
 # and the per-site group_vars). When the env var is unset, the runtime
 # image and Go binary are byte-identical to the pre-Zenoh shape.
 
-# Build stage — Chainguard Go image (per docs/design/os-supply-chain-security.md)
-FROM cgr.dev/chainguard/go:latest AS build
+# Base images are build arguments named for their role; the defaults are
+# the public images in ops/base-images/ (goatcore docs/design/base-images.md).
+ARG BASE_GO_BUILD=docker.io/library/golang:1.26-bookworm@sha256:23ce71337b726608afb1bc00986e630a05034a87a87ea1fc2cd1ae5cf33387eb
+ARG BASE_RUNTIME_STATIC=gcr.io/distroless/static-debian13:nonroot@sha256:25ac8f0c3b2334a9eb05452266bd4697864a8c8ef0ef71e5e6480d7f92868329
+
+# Build stage — the go-build base
+FROM ${BASE_GO_BUILD} AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -29,8 +34,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # preserves ownership — so the SQLite open succeeds without host-side chown.
 RUN mkdir -p /out/data && chown 65532:65532 /out/data
 
-# Runtime stage — Chainguard distroless static, nonroot UID 65532 by default.
-FROM cgr.dev/chainguard/static:latest
+# Runtime stage — the runtime-static base, nonroot UID 65532 by default.
+FROM ${BASE_RUNTIME_STATIC}
 COPY --from=build /out/airdefenders /usr/local/bin/airdefenders
 COPY --from=build --chown=65532:65532 /out/data /data
 EXPOSE 8095

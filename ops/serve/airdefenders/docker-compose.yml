@@ -2,7 +2,7 @@
 #
 # Service bundles the game HTML + shared-score API in one container.
 # Storage: SQLite on a named Docker volume (nonroot UID 65532 from the
-# Chainguard static runtime would not be able to write to a host bind-mount).
+# distroless static runtime would not be able to write to a host bind-mount).
 
 services:
   airdefenders:

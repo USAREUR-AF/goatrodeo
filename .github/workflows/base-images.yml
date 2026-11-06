@@ -1,0 +1,39 @@
+name: base-images
+
+# The public tree's base images (goatcore ADR 1220, docs/design/base-images.md).
+# Every Dockerfile names its base images through a role in ops/base-images/,
+# every role is a digest-pinned image anyone may pull and redistribute, and no
+# Dockerfile, role default or compose template points at a subscription
+# registry except the waived references in ops/base-images/vendor-refs.allow.
+# An overlay replaces the role files with its own; this guard runs only here.
+#
+# A Dependabot refresh of a role file fails this check until the Dockerfile
+# defaults follow it: run `python3 ops/base-images/base-images.py sync` on the
+# branch and push. The rewritten Dockerfiles are what rebuild the images.
+
+on:
+  pull_request:
+    paths:
+      - '**/Dockerfile'
+      - '**/Dockerfile.*'
+      - '**/*.Dockerfile'
+      - 'ops/base-images/**'
+      - 'ops/ansible/**'
+      - '.github/workflows/base-images.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: The guard fails on each defect it exists to catch
+        run: python3 ops/base-images/base-images.py --self-test
+      - name: Base images are public, pinned and named by role
+        run: python3 ops/base-images/base-images.py check

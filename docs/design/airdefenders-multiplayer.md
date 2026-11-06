@@ -468,7 +468,7 @@ Content-Type: application/json
 
 **Per-vendor X.509 + portal topic registration STILL APPLY.** The portal inspector's "decoded samples" path and the schema viewer / autogen-code surfaces use the uploaded `.fds` descriptors and the registered topic rows — independent of the wire-publish auth surface. See §".proto schemas" below; the bootstrap script unchanged in posture.
 
-The publisher is pure stdlib (`net/http` + `encoding/json`) so the Go binary stays CGO-free and the Chainguard `static:latest` runtime image is preserved unconditionally — no build-tag gating, no glibc-dynamic variant. Whether the publisher actually emits is a runtime decision: `ZENOH_PUBLISH=1` env var on. A goatnet that leaves `airdefenders_zenoh_enabled` at the role default (false) leaves the env var unset and runs the byte-identical binary with no publisher.
+The publisher is pure stdlib (`net/http` + `encoding/json`) so the Go binary stays CGO-free and the static distroless runtime image is preserved unconditionally — no build-tag gating, no glibc-dynamic variant. Whether the publisher actually emits is a runtime decision: `ZENOH_PUBLISH=1` env var on. A goatnet that leaves `airdefenders_zenoh_enabled` at the role default (false) leaves the env var unset and runs the byte-identical binary with no publisher.
 
 ### Envelope
 

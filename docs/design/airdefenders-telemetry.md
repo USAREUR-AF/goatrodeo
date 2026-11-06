@@ -191,7 +191,7 @@ Retention is Zenoh storage TTL, configured per keyexpr prefix in `ops/ansible/ro
 ## What this costs the project vs what it produces
 
 - **SQLite path stays alive** as a fallback. The Go server retains the SQLite write path alongside Zenoh publishing until Step 9 completes and the leaderboard read path has been migrated. Game keeps working throughout.
-- **Retained for free:** all UI, all game logic, all mesh-only routing, all Chainguard build posture, all observability, all deployment tooling.
+- **Retained for free:** all UI, all game logic, all mesh-only routing, all hardened-base build posture, all observability, all deployment tooling.
 - **Added:** ~500 LOC of Go instrumentation (telemetry-client + ingest endpoint), ~100 LOC of JS instrumentation, ~13 JSON schema files, one Grafana dashboard, one stateful-consumer config, one analytics job. All of it is either reusable platform code OR thin configuration on top of reusable platform code.
 - **Produced for the broader system:**
   - `ops/telemetry-client/` Go module exists — gatewatch migrates to it, future apps use it.

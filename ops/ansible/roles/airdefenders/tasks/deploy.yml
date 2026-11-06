@@ -52,7 +52,7 @@
     - airdefenders_zenoh_enabled | bool
     - airdefenders_zenoh_sidecar_image is defined
 
-# Chainguard nonroot uid 65532 must be able to read the bind-mounted certs.
+# The distroless nonroot uid 65532 must be able to read the bind-mounted certs.
 - name: airdefenders | normalize sidecar cert dir ownership for uid 65532
   ansible.builtin.file:
     path: "{{ airdefenders_zenoh_sidecar_cert_dir }}"
