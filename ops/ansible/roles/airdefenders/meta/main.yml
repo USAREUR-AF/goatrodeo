@@ -12,6 +12,8 @@ galaxy_info:
 
 # Universal deploy-rollback ledger (ADR 1060).
 dependencies:
+  - role: airdefenders-preflight
+    when: airdefenders_enabled | default(true) | bool
   - role: rollback-ledger
     when: airdefenders_enabled | default(true) | bool
     vars:
