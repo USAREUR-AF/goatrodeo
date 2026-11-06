@@ -52,37 +52,6 @@
     - airdefenders_zenoh_enabled | bool
     - airdefenders_zenoh_sidecar_image is defined
 
-# Pre-flight the vendor leaf + CA root the sidecar mTLS session needs.
-# Fail closed with an actionable message rather than letting the sidecar
-# crash-loop on a missing cert — mirrors the zenoh-synth-vendors role.
-- name: airdefenders | pre-flight sidecar vendor leaf + key + CA root exist
-  ansible.builtin.stat:
-    path: "{{ item }}"
-  loop:
-    - "{{ airdefenders_zenoh_sidecar_cert_dir }}/{{ airdefenders_zenoh_vendor }}-cert.pem"
-    - "{{ airdefenders_zenoh_sidecar_cert_dir }}/{{ airdefenders_zenoh_vendor }}-key.pem"
-    - "{{ airdefenders_zenoh_sidecar_ca_root_src }}"
-  register: airdefenders_sidecar_cert_stats
-  become: true
-  when: airdefenders_zenoh_enabled | bool
-
-- name: airdefenders | fail on missing sidecar cert material
-  ansible.builtin.fail:
-    msg: >-
-      airdefenders rest-pub-bridge sidecar: required mTLS file missing at
-      {{ item.item }}. Mint the vendor leaf via
-      ops/zenoh-trial-peers/bootstrap-airdefenders-portal.sh (it SCPs the
-      cert to {{ airdefenders_zenoh_sidecar_cert_dir }} on this host), and
-      ensure the goat-zenoh router is deployed (it owns the CA root at
-      {{ airdefenders_zenoh_sidecar_ca_root_src }}). Then re-run.
-  loop: "{{ airdefenders_sidecar_cert_stats.results | default([]) }}"
-  when:
-    - airdefenders_zenoh_enabled | bool
-    - item is not skipped
-    - not (item.stat.exists | default(false))
-  loop_control:
-    label: "{{ item.item | default('?') }}"
-
 # Chainguard nonroot uid 65532 must be able to read the bind-mounted certs.
 - name: airdefenders | normalize sidecar cert dir ownership for uid 65532
   ansible.builtin.file:
