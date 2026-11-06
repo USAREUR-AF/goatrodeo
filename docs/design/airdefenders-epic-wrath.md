@@ -6,7 +6,7 @@
 
 Air Defenders Epic Wrath is a **clean fork** of [airdefenders-classic](airdefenders-leaderboard.md) — a multiplayer, async / turn-based, server-authoritative game whose **architectural purpose is to torture-test the goat substrate's multi-master + partition-tolerance + schema-evolution + wide-event surfaces** at richer dimensionality than Classic's single append-only leaderboard exercises.
 
-Classic stays untouched. Epic Wrath is a new top-level service at [`ops/serve/airdefenders-epic-wrath/`](../../ops/serve/airdefenders-epic-wrath/) with its own schema, module tree, frontend, and lifecycle. **No shared library, no shared schema, no cross-variant identity import, no bug-fix back-port mechanism.** Goat-wide platform code (Zenoh client, Ory, OTel, Chainguard build posture, schema-enforcer per [Block 23](ai-rapid-adaptation.md)) is the only shared layer; that's *platform*, not "airdefenders shared."
+Classic stays untouched. Epic Wrath is a new top-level service at [`ops/serve/airdefenders-epic-wrath/`](../../ops/serve/airdefenders-epic-wrath/) with its own schema, module tree, frontend, and lifecycle. **No shared library, no shared schema, no cross-variant identity import, no bug-fix back-port mechanism.** Goat-wide platform code (Zenoh client, Ory, OTel, base-image roles, schema-enforcer per [Block 23](ai-rapid-adaptation.md)) is the only shared layer; that's *platform*, not "airdefenders shared."
 
 ## Why this variant exists
 
@@ -149,7 +149,7 @@ Inherits from goat platform (no Epic Wrath-specific surface):
 
 | Concern | Source |
 |---|---|
-| Build (Chainguard multi-stage, static binary) | Mirrors [`ops/serve/airdefenders/Dockerfile`](../../ops/serve/airdefenders/Dockerfile) pattern |
+| Build (multi-stage on the base-image roles, static binary) | Mirrors [`ops/serve/airdefenders/Dockerfile`](../../ops/serve/airdefenders/Dockerfile) pattern |
 | Deploy (Ansible role + per-site compose overlay) | Mirrors [`ops/ansible/airdefenders.yml`](../../ops/ansible/airdefenders.yml) pattern |
 | Observability (Prometheus scrape + Grafana dashboard + isitup tile + smoketest entry) | Mirrors Classic |
 | Identity | Ory per [ADR 0411](../adr/0411-ory-idp-mvp.md); group `epic-players` (regular) + `epic-admins` (D4 admin-API gate) |

@@ -14,7 +14,7 @@
 // `http://<router>:8000/<keyexpr>` with the JSON envelope as body.
 //
 // This file replaces the prior //go:build zenoh CGo path entirely. No
-// build tag, no CGO, pure stdlib. The nethost-hosted Chainguard static image
+// build tag, no CGO, pure stdlib. The nethost-hosted distroless static image
 // is preserved unconditionally — gating is the runtime env var
 // `ZENOH_PUBLISH=1` (read by main.go), not a build tag.
 //

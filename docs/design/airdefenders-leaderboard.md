@@ -30,7 +30,7 @@ One domain, one container, one process. No separate database container, no cross
 
 - **Go 1.22** (stdlib `net/http` with pattern-matched routes)
 - **SQLite** via `modernc.org/sqlite` (pure-Go, no CGO → fully static binary)
-- **Chainguard** `cgr.dev/chainguard/go` (build) + `cgr.dev/chainguard/static` (runtime), per `docs/design/os-supply-chain-security.md`
+- **Base images by role** `go-build` (build) + `runtime-static` (runtime), `ops/base-images/` (goatcore ADR 1220): public defaults `golang` + distroless static; an environment's overlay may name Chainguard's
 - **Server-Sent Events** for live leaderboard pushes (reconnect handled by `EventSource` in the browser)
 - **Prometheus** text exposition, hand-rolled (no client library; six counters + three gauges)
 
@@ -124,7 +124,7 @@ ops/serve/airdefenders/
 ├── schema.sql           — reference copy of embedded schema
 ├── index.html           — game (moved from ops/serve/airdefenders.html)
 ├── go.mod / go.sum
-├── Dockerfile           — Chainguard multi-stage (static binary)
+├── Dockerfile           — multi-stage on the base-image roles (static binary)
 └── docker-compose.yml   — dev-local compose (Ansible writes its own on host)
 
 ops/ansible/

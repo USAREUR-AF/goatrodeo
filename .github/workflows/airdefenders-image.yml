@@ -1,5 +1,5 @@
 name: airdefenders-image
-# Builds ops/serve/airdefenders/Dockerfile (Chainguard Go, static
+# Builds ops/serve/airdefenders/Dockerfile (go-build → runtime-static bases, static
 # distroless) and publishes to ghcr.io/<owner>/airdefenders.
 #
 # One image: a pure-Go static binary with the Zenoh REST publisher linked

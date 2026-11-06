@@ -30,6 +30,10 @@ The runbook is [`docs/operations/airdefenders-zenoh-demo.md`](docs/operations/ai
 
 The image is built by `.github/workflows/airdefenders-image.yml` and published as `ghcr.io/usareur-af/airdefenders`.
 
+## Base images
+
+The image builds on base images named by role, `ops/base-images/<role>/Dockerfile` (`go-build`, `runtime-static`); the defaults are images anyone may redistribute. To build on your own, such as a hardened catalogue, put your own role files at the same paths in your environment and copy it over this checkout before building: goatcore's [build goat images on your own base images](https://github.com/usareur-af/goatcore/blob/main/docs/operations/build-on-your-own-base-images.md). `ops/base-images/base-images.py` and the two role files are the same files as goatcore's.
+
 ## Contributing
 
 Pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues privately, as [SECURITY.md](SECURITY.md) describes.

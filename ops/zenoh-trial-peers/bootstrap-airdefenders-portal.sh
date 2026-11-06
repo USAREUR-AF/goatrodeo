@@ -188,7 +188,7 @@ if [ -n "$VENDOR_BUNDLE_URL" ]; then
     ssh "${SCP_TARGET%%:*}" "sudo mkdir -p ${SCP_TARGET#*:} && sudo chown -R \$USER ${SCP_TARGET#*:}" || true
     scp "$CERT_OUT_DIR/$VENDOR/${VENDOR}-cert.pem" "$SCP_TARGET/"
     scp "$CERT_OUT_DIR/$VENDOR/${VENDOR}-key.pem" "$SCP_TARGET/"
-    # Chown to UID 65532 (Chainguard nonroot) so the container reads them.
+    # Chown to UID 65532 (distroless nonroot) so the container reads them.
     ssh "${SCP_TARGET%%:*}" "sudo chown -R 65532:65532 ${SCP_TARGET#*:}" || true
     echo "  cert tree placed at ${SCP_TARGET#*:} (uid 65532)"
   fi
