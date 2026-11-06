@@ -1,0 +1,2930 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Air Defenders</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { background: #0a0a1a; width: 100%; height: 100%; overflow: hidden; touch-action: manipulation; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+body { display: flex; align-items: center; justify-content: center; font-family: 'Courier New', monospace; }
+#frame { display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%; }
+canvas { display: block; touch-action: none; }
+#touchControls { display: none; width: 100%; max-width: 800px; padding: 8px; flex-direction: column; gap: 8px; }
+#touchControls.touch { display: flex; }
+#touchControls .row { display: flex; gap: 8px; }
+#touchControls .row > * { flex: 1; }
+#touchControls button { min-height: 56px; font-family: 'Courier New', monospace; font-weight: bold; font-size: 14px; color: #cce; background: #1a1a2a; border: 2px solid #444; border-radius: 6px; padding: 8px; touch-action: manipulation; user-select: none; -webkit-user-select: none; }
+#touchControls button.fire { background: #2a0a0a; border-color: #ff6644; color: #ffcc66; min-height: 68px; font-size: 18px; flex: 2; }
+#touchControls button.adv  { background: #0a1a2a; border-color: #44aaff; color: #aaddff; }
+#touchControls button.mode { border-color: #ffcc00; color: #ffcc00; }
+#touchControls button.sup  { border-color: #00aaff; color: #00aaff; }
+#touchControls button.sw   { border-color: #88ccff; color: #88ccff; }
+#touchControls button.dir  { background: #0a2a1a; border-color: #00cc66; color: #aaffcc; font-size: 22px; min-height: 64px; flex: 1; }
+#touchControls button.dir.held { background: #1a4a2a; filter: brightness(1.4); }
+#touchControls button:active { transform: scale(0.97); filter: brightness(1.3); }
+#touchControls button[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div id="frame">
+  <canvas id="game"></canvas>
+  <div id="touchControls">
+    <div class="row">
+      <button id="btnLeft"  class="dir" type="button" aria-label="Move launcher left">&#9664; MOVE</button>
+      <button id="btnRight" class="dir" type="button" aria-label="Move launcher right">MOVE &#9654;</button>
+    </div>
+    <div class="row">
+      <button id="btnMode" class="mode" type="button">MODE</button>
+      <button id="btnSup"  class="sup"  type="button">RESUPPLY</button>
+      <button id="btnSwitch" class="sw" type="button" hidden>SWITCH</button>
+    </div>
+    <div class="row">
+      <button id="btnFire" class="fire" type="button">FIRE</button>
+      <button id="btnAdv"  class="adv"  type="button">START</button>
+    </div>
+  </div>
+</div>
+<input id="nameInput" type="text" maxlength="14" autocomplete="off" spellcheck="false"
+       style="position:absolute; display:none; font-family:'Courier New',monospace;
+              font-size:18px; background:#0a1a0a; color:#00ff88; border:2px solid #00aa66;
+              border-radius:4px; text-align:center; padding:8px 12px; width:240px;
+              outline:none; z-index:10;">
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// --- RESPONSIVE SIZING ---
+// Internal resolution stays 800x700, canvas element scales to fill screen
+const GAME_W = 800;
+const GAME_H = 700;
+canvas.width = GAME_W;
+canvas.height = GAME_H;
+
+const touchControls = document.getElementById('touchControls');
+function resizeCanvas() {
+  const vv = window.visualViewport;
+  const w = vv ? vv.width : window.innerWidth;
+  const h = vv ? vv.height : window.innerHeight;
+  // Reserve room for the HTML touch-controls strip when it's visible.
+  const stripH = (touchControls && touchControls.classList.contains('touch')) ? (touchControls.offsetHeight || 0) : 0;
+  const availH = Math.max(200, h - stripH);
+  const margin = Math.min(w, availH) < 500 ? 1.0 : 0.98;
+  const scale = Math.min(w / GAME_W, availH / GAME_H) * margin;
+  canvas.style.width = (GAME_W * scale) + 'px';
+  canvas.style.height = (GAME_H * scale) + 'px';
+}
+// Defer first sizing one frame so the touchControls strip's offsetHeight
+// reflects the .touch class addition (set below once isTouchDevice resolves).
+requestAnimationFrame(resizeCanvas);
+window.addEventListener('resize', resizeCanvas);
+if (window.visualViewport) window.visualViewport.addEventListener('resize', resizeCanvas);
+window.addEventListener('orientationchange', resizeCanvas);
+
+// --- TOUCH SUPPORT ---
+const isTouchDevice = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+if (isTouchDevice) touchControls.classList.add('touch');
+let touchSteerForce = 0;
+let touchSteerActive = false;
+let touchX = 0;
+let touchY = 0;
+
+// Virtual button zones (defined in canvas coordinates)
+const BTN = {
+  mode: { x: 15, y: GAME_H - 115, w: 200, h: 40 },
+  resupply: { x: GAME_W - 215, y: GAME_H - 115, w: 200, h: 40 },
+  switchLauncher: { x: GAME_W / 2 - 75, y: GAME_H - 115, w: 150, h: 40 },
+};
+// Title-screen-only button that navigates to the co-op multiplayer page.
+const BTN_MP_LINK = { x: GAME_W / 2 - 130, y: 590, w: 260, h: 44 };
+// TITLE-screen EDIT NAME button — small canvas hit-rect above the controls
+// block. Tap pops the nameInput overlay; commit on Enter / blur persists to
+// localStorage so both SP + MP pick up the new name.
+const BTN_EDIT_NAME = { x: GAME_W / 2 - 130, y: 420, w: 260, h: 36 };
+// TITLE-screen DEMO button — admins only (see ME below). Top-right corner,
+// clear of the leaderboard, the controls block and the ground strip.
+const BTN_DEMO = { x: GAME_W - 275, y: 14, w: 260, h: 32 };
+
+// ── Who is looking? (DEMO button) ─────────────────────────────────────────
+// GET /api/me says whether the viewer may run the fabric demo. Behind the
+// authenticated door the server reads the proxy's X-Forwarded-Groups; with no
+// door it answers demo_admin=false for everyone (fail closed). The button is
+// drawn and hit-tested only when demo_admin is true, so ordinary players never
+// see it. A network error or 401 (no session yet) means "not an admin".
+const ME = { demo_admin: false, user: '' };
+fetch('/api/me', { credentials: 'same-origin', cache: 'no-store' })
+  .then(r => r.ok ? r.json() : null)
+  .then(v => { if (v) { ME.demo_admin = !!v.demo_admin; ME.user = v.user || ''; } })
+  .catch(() => {});
+// One click: the /demo page opens in its own tab (named, so a second click
+// focuses the same tab instead of starting a second fleet) and the eight bots
+// fill the room and start publishing. Close that tab to stop the demo.
+// On a goatnet (host airdefenders.<site>.<zone>) the same click also opens
+// panoscope with the airdefenders publisher pre-selected. The Block 94 `key=`
+// form is used, not `vendor=`: on a slot-pool goatnet the publisher node
+// carries no vendor tag, so `?vendor=airdefenders` selects nothing,
+// while `?key=<topic>` resolves to the topic's publisher and
+// opens its side panel with the live stream.
+// The demo tab's top bar carries the same panoscope link for the case where
+// the browser's popup rule lets only one window through per click.
+// <site> from airdefenders.<site>.<zone>; the label after the leading one.
+const PANOSCOPE_SITE = (window.location.host.split('.')[1] || '');
+function openFabricDemo() {
+  const host = window.location.host;
+  if (/^airdefenders\./.test(host)) {
+    window.open(window.location.protocol + '//' + host.replace(/^airdefenders\./, 'panoscope.') + '/?key=' + encodeURIComponent('airdefenders/' + PANOSCOPE_SITE + '/missile/fired/v1'),
+                'airdefenders-fabric-panoscope');
+  }
+  window.open('/demo', 'airdefenders-fabric-demo');
+}
+function drawDemoButton(btn) {
+  if (!ME.demo_admin) return;
+  ctx.fillStyle = '#2a1a0a';
+  ctx.fillRect(btn.x, btn.y, btn.w, btn.h);
+  ctx.strokeStyle = '#ffaa33';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(btn.x, btn.y, btn.w, btn.h);
+  ctx.fillStyle = '#ffaa33';
+  ctx.font = 'bold 13px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('\u25B6 RUN FABRIC DEMO  (admin)', btn.x + btn.w / 2, btn.y + 21);
+  ctx.lineWidth = 1;
+}
+
+function touchToCanvas(touch) {
+  const r = canvas.getBoundingClientRect();
+  return {
+    x: (touch.clientX - r.left) * (GAME_W / r.width),
+    y: (touch.clientY - r.top) * (GAME_H / r.height)
+  };
+}
+
+function inBtn(pt, btn) {
+  return pt.x >= btn.x && pt.x <= btn.x + btn.w && pt.y >= btn.y && pt.y <= btn.y + btn.h;
+}
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const pt = touchToCanvas(e.changedTouches[i]);
+
+    // TITLE — taps may navigate to MP page or open the name editor; state
+    // advance is SPACE-only.
+    if (state === TITLE) {
+      if (inBtn(pt, BTN_EDIT_NAME)) { openNameEditorOnTitle(); continue; }
+      if (inBtn(pt, BTN_MP_LINK)) { window.location.href = '/mp'; return; }
+      if (ME.demo_admin && inBtn(pt, BTN_DEMO)) { openFabricDemo(); return; }
+      continue;
+    }
+    // Kill point tap detection (wave end + game over). State advance happens
+    // on SPACE only — taps select / dismiss freeze frames or change period.
+    if ((state === WAVE_END || state === GAME_OVER) && killSnapshots.length > 0) {
+      if (selectedSnapshot !== null) { selectedSnapshot = null; continue; }
+      let hitKill = false;
+      for (let ki = 0; ki < killSnapshots.length; ki++) {
+        if (Math.hypot(pt.x - killSnapshots[ki].x, pt.y - killSnapshots[ki].y) < 24) {
+          selectedSnapshot = ki;
+          hitKill = true;
+          break;
+        }
+      }
+      if (hitKill) continue;
+    }
+    if (state === GAME_OVER) {
+      if (enteringName) continue; // don't restart while entering name
+      if (lbTapZone && pt.x >= lbTapZone.x1 && pt.x <= lbTapZone.x2 && pt.y >= lbTapZone.y1 && pt.y <= lbTapZone.y2) {
+        leaderboardPeriod = (leaderboardPeriod + 1) % 5;
+        refreshServerScores(leaderboardPeriod, true);
+        continue;
+      }
+      // Restart is SPACE-only (no tap-to-restart).
+      continue;
+    }
+
+    // Emplacement — drag radars. State advance to COMBAT is SPACE-only.
+    if (state === EMPLACEMENT) {
+      for (let ri = radars.length - 1; ri >= 0; ri--) {
+        const d = Math.hypot(pt.x - radars[ri].x, pt.y - radars[ri].y);
+        if (d < 30) { draggedRadar = ri; break; }
+      }
+      continue;
+    }
+
+    // Combat
+    if (state === COMBAT) {
+      // Bunker RUN button — highest priority during warning
+      if (bunkerPhase === 'active' && bunkerRunTimer === 0 && inBtn(pt, BTN_BUNKER_RUN)) {
+        startBunkerRun();
+        continue;
+      }
+      // Camel release button
+      if (camelMode && camelPool > 0 && inBtn(pt, BTN_CAMEL)) {
+        releaseCamel();
+        continue;
+      }
+      // Mode button
+      if (inBtn(pt, BTN.mode)) {
+        const L = launchers[activeLauncher];
+        L.fireMode = (L.fireMode + 1) % 3;
+        if (L.fireMode === 0) { L.arming = false; L.armTimer = 0; }
+        continue;
+      }
+      // Resupply button
+      if (inBtn(pt, BTN.resupply)) {
+        triggerResupply(activeLauncher);
+        continue;
+      }
+      // Switch launcher button
+      if (launchers.length > 1 && inBtn(pt, BTN.switchLauncher)) {
+        activeLauncher = (activeLauncher + 1) % launchers.length;
+        continue;
+      }
+      // Tap launcher bar = select launcher and fire
+      if (pt.y > GAME_H - 55) {
+        const li = getLauncherAtX(pt.x);
+        fireFromLauncher(li);
+        continue;
+      }
+      // Touch sky = steer
+      touchX = pt.x;
+      touchY = pt.y;
+      touchSteerActive = true;
+      continue;
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const pt = touchToCanvas(e.changedTouches[i]);
+
+    // Emplacement — drag radar
+    if (state === EMPLACEMENT && draggedRadar >= 0) {
+      radars[draggedRadar].x = Math.max(40, Math.min(GAME_W - 40, pt.x));
+      radars[draggedRadar].y = Math.max(100, Math.min(GAME_H - 120, pt.y));
+      continue;
+    }
+
+    // Combat — update touch position for interceptor-relative steering
+    if (state === COMBAT && touchSteerActive) {
+      touchX = pt.x;
+      touchY = pt.y;
+    }
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  draggedRadar = -1;
+  touchSteerForce = 0;
+  touchSteerActive = false;
+}, { passive: false });
+
+canvas.addEventListener('touchcancel', e => {
+  draggedRadar = -1;
+  touchSteerForce = 0;
+  touchSteerActive = false;
+});
+
+// --- GAME STATE ---
+const TITLE = 0, EMPLACEMENT = 1, COMBAT = 2, WAVE_END = 3, GAME_OVER = 4, CELEBRATION = 5;
+let state = TITLE;
+let wave = 0;
+// Dev preview — URL ?wave=N starts the next new game at wave N
+const urlParams = new URLSearchParams(window.location.search);
+let cheatStartWave = parseInt(urlParams.get('wave') || '1', 10);
+if (!isFinite(cheatStartWave) || cheatStartWave < 1) cheatStartWave = 1;
+if (cheatStartWave > 99) cheatStartWave = 99;
+wave = cheatStartWave - 1;
+let score = 0;
+let lives = 5;
+let waveTimer = 0;
+let waveEndTimer = 0;
+let emplacementReady = false;
+let killFlash = 0;
+let spaceCooldown = 0;
+// Bonus-life: player earns +1 life per 2x expected-hits-per-wave intercepts.
+// Expected hits = 0.8 * shahedsPerWave, so threshold = ceil(1.6 * (2 + wave*2)).
+let intercepts = 0;
+let lifeUpFlash = 0;
+function lifeUpThreshold() { return Math.ceil(1.6 * (2 + wave * 2)); }
+function registerIntercepts(n) {
+  intercepts += n;
+  while (intercepts >= lifeUpThreshold()) {
+    intercepts -= lifeUpThreshold();
+    lives++;
+    lifeUpFlash = 120;
+  }
+}
+const ARM_TIME = 60;   // frames to arm (1 second)
+const AUTOPILOT_ARM_TIME = 120; // frames to arm autopilot (2 seconds)
+const PROX_RADIUS = 147; // blast kill radius
+const PROX_TRIGGER = PROX_RADIUS / 4; // detonation trigger — explodes when within 1/4 of blast radius
+const AUTOPILOT_DETECT_RADIUS = PROX_RADIUS * 2; // auto-seek detection range
+const RESUPPLY_TIME = 120; // frames to resupply (2 seconds)
+
+// --- LEADERBOARD ---
+// Server-backed (shared across all players via /api/scores).
+// localStorage is used as an offline fallback: when the server is unreachable,
+// submissions are queued in PENDING_KEY and replayed once the network returns,
+// and LEADERBOARD_KEY holds a local mirror for display during island-mode.
+const LEADERBOARD_KEY = 'airdefenders_scores'; // offline mirror
+const PENDING_KEY = 'airdefenders_pending';    // unsent submissions (retry queue)
+const NAME_KEY = 'airdefenders_name';
+let leaderboardPeriod = 4; // 0=daily, 1=weekly, 2=monthly, 3=yearly, 4=all-time
+const PERIOD_LABELS = ['DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY', 'ALL TIME'];
+const PERIOD_API = ['daily', 'weekly', 'monthly', 'yearly', 'all'];
+let enteringName = false;
+let scoreSaved = false;
+const nameInput = document.getElementById('nameInput');
+
+// Server-cached scores, per period. Refreshed on fetch + SSE.
+const serverScores = { daily: [], weekly: [], monthly: [], yearly: [], all: [] };
+const lastFetch = { daily: 0, weekly: 0, monthly: 0, yearly: 0, all: 0 };
+let onlineMode = true;
+let sseSource = null;
+
+// Restore last used name
+nameInput.value = localStorage.getItem(NAME_KEY) || '';
+
+function loadLocalScores() {
+  try { return JSON.parse(localStorage.getItem(LEADERBOARD_KEY)) || []; }
+  catch { return []; }
+}
+
+function saveLocalScore(entry) {
+  const scores = loadLocalScores();
+  scores.push(entry);
+  scores.sort((a, b) => b.score - a.score);
+  if (scores.length > 100) scores.length = 100;
+  localStorage.setItem(LEADERBOARD_KEY, JSON.stringify(scores));
+}
+
+async function refreshServerScores(period, force) {
+  const key = PERIOD_API[period];
+  const now = Date.now();
+  if (!force && now - lastFetch[key] < 5000) return;
+  lastFetch[key] = now;
+  try {
+    // Single-player explicitly asks for mode=sp so 8-player team scores from
+    // MP don't crowd the solo leaderboard.
+    const res = await fetch('/api/scores?period=' + key + '&mode=sp', { cache: 'no-store' });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    serverScores[key] = data.scores || [];
+    onlineMode = true;
+    flushPending();
+  } catch (err) {
+    onlineMode = false;
+  }
+}
+
+async function submitScore(entry) {
+  try {
+    const res = await fetch('/api/scores', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: entry.name, score: entry.score, wave: entry.wave, mode: 'sp' }),
+    });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    onlineMode = true;
+    // Refresh current view so submitter sees their entry immediately.
+    refreshServerScores(leaderboardPeriod, true);
+    return true;
+  } catch (err) {
+    const pending = JSON.parse(localStorage.getItem(PENDING_KEY) || '[]');
+    pending.push(entry);
+    localStorage.setItem(PENDING_KEY, JSON.stringify(pending));
+    onlineMode = false;
+    return false;
+  }
+}
+
+async function flushPending() {
+  const pending = JSON.parse(localStorage.getItem(PENDING_KEY) || '[]');
+  if (!pending.length) return;
+  const remaining = [];
+  for (const entry of pending) {
+    try {
+      const res = await fetch('/api/scores', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: entry.name, score: entry.score, wave: entry.wave }),
+      });
+      if (!res.ok) remaining.push(entry);
+    } catch {
+      remaining.push(entry);
+    }
+  }
+  localStorage.setItem(PENDING_KEY, JSON.stringify(remaining));
+}
+
+function saveScore(s, w, name) {
+  const n = (name || 'ANON').toUpperCase().substring(0, 14);
+  localStorage.setItem(NAME_KEY, n);
+  const entry = { score: s, wave: w, date: Date.now(), name: n };
+  saveLocalScore(entry);   // offline mirror
+  submitScore(entry);      // server submission (queued if offline)
+}
+
+function subscribeSSE() {
+  if (sseSource) return;
+  try {
+    sseSource = new EventSource('/api/scores/stream');
+    sseSource.addEventListener('score', e => {
+      try {
+        const s = JSON.parse(e.data);
+        // Live push into all-time cache; other periods refresh naturally.
+        if (!serverScores.all.some(x => x.id === s.id)) {
+          serverScores.all.push(s);
+          serverScores.all.sort((a, b) => b.score - a.score);
+          if (serverScores.all.length > 10) serverScores.all.length = 10;
+        }
+        onlineMode = true;
+      } catch { /* ignore malformed event */ }
+    });
+    // EventSource auto-reconnects on error; nothing to do.
+  } catch {
+    // Browser doesn't support SSE — polling covers it.
+  }
+}
+
+function showNameInput() {
+  enteringName = true;
+  scoreSaved = false;
+  const r = canvas.getBoundingClientRect();
+  const scale = r.width / GAME_W;
+  nameInput.style.display = 'block';
+  nameInput.style.left = (r.left + r.width / 2 - 110) + 'px';
+  nameInput.style.top = (r.top + (GAME_H / 2 + 5) * scale - 18) + 'px';
+  nameInput.style.fontSize = Math.max(14, 18 * scale) + 'px';
+  nameInput.focus();
+  nameInput.select();
+}
+
+function hideNameInput() {
+  nameInput.style.display = 'none';
+  nameInput.blur();
+  enteringName = false;
+}
+
+// --- END-OF-GAME PHRASES (verbatim, do not edit grammar) ---
+const END_PHRASES = [
+  'Good Thing Time Take Time!',
+  "Retro Vibes, Let's Join Us!",
+  'Way Simplicity. Small Wins Matter!',
+  'Never Strive, Always Settle!',
+];
+const PHRASE_IDX_KEY = 'airdefenders_phrase_idx';
+let currentPhrase = '';
+
+function pickEndPhrase() {
+  let idx = parseInt(localStorage.getItem(PHRASE_IDX_KEY) || '0', 10);
+  if (isNaN(idx) || idx < 0) idx = 0;
+  currentPhrase = END_PHRASES[idx % END_PHRASES.length];
+  localStorage.setItem(PHRASE_IDX_KEY, String((idx + 1) % END_PHRASES.length));
+}
+
+// --- TOP-FIVE CELEBRATION ---
+let celebrationTimer = 0;          // frames remaining (120 = 2s at 60fps)
+let celebrationRank = 0;           // 1-5; used in the flashing banner
+const CELEBRATION_FRAMES = 120;
+const confetti = [];               // {x,y,vx,vy,color,size,rot,rotV}
+const CONFETTI_COLORS = ['#00ff88', '#ffcc00', '#ff4488', '#00aaff', '#ff8844', '#aa44ff'];
+
+function spawnConfetti(count) {
+  confetti.length = 0;
+  for (let i = 0; i < count; i++) {
+    confetti.push({
+      x: Math.random() * GAME_W,
+      y: -20 - Math.random() * 300,
+      vx: (Math.random() - 0.5) * 4,
+      vy: 1 + Math.random() * 3,
+      color: CONFETTI_COLORS[Math.floor(Math.random() * CONFETTI_COLORS.length)],
+      size: 4 + Math.random() * 6,
+      rot: Math.random() * Math.PI * 2,
+      rotV: (Math.random() - 0.5) * 0.3,
+    });
+  }
+}
+
+function tickConfetti() {
+  for (const p of confetti) {
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.08;
+    p.rot += p.rotV;
+    if (p.y > GAME_H + 20) { // recycle off-screen particles back to the top
+      p.y = -20;
+      p.x = Math.random() * GAME_W;
+      p.vy = 1 + Math.random() * 3;
+    }
+  }
+}
+
+function drawConfetti() {
+  for (const p of confetti) {
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.rot);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size * 0.6);
+    ctx.restore();
+  }
+}
+
+function startCelebration(rank) {
+  celebrationRank = rank;
+  celebrationTimer = CELEBRATION_FRAMES;
+  spawnConfetti(120);
+  state = CELEBRATION;
+}
+
+function confirmName() {
+  const name = nameInput.value.trim() || 'ANON';
+  const myScore = score;
+  saveScore(myScore, wave, name);
+  scoreSaved = true;
+  hideNameInput();
+  // Determine rank against the currently cached top-10. If we beat at least
+  // five existing scores' worth of room (i.e. rank 1-5), run the celebration
+  // before falling into the normal game-over screen.
+  const all = (serverScores.all && serverScores.all.length > 0) ? serverScores.all : loadLocalScores();
+  const rank = all.filter(s => s.score > myScore).length + 1;
+  if (rank <= 5) startCelebration(rank);
+  // Pick the end-of-game phrase now so the game-over screen has it ready.
+  pickEndPhrase();
+}
+
+nameInput.addEventListener('keydown', e => {
+  e.stopPropagation(); // don't let game keys fire
+  if (e.code === 'Enter')  {
+    if (state === TITLE) closeNameEditorOnTitle(true);
+    else confirmName();
+  } else if (e.code === 'Escape') {
+    if (state === TITLE) closeNameEditorOnTitle(false);
+    else confirmName(); // GAME_OVER: Esc still confirms-with-current-text (legacy)
+  }
+});
+nameInput.addEventListener('blur', () => {
+  // Mobile soft-keyboard "done" collapses without firing a keydown — blur is
+  // the signal that the user is finished typing. Treat as commit on the
+  // TITLE screen so the entered name lands without an explicit Enter press.
+  if (state === TITLE && nameInput.style.display !== 'none') closeNameEditorOnTitle(true);
+});
+
+function openNameEditorOnTitle() {
+  enteringName = true;
+  const r = canvas.getBoundingClientRect();
+  const scale = r.width / GAME_W;
+  nameInput.value = (localStorage.getItem(NAME_KEY) || '').toUpperCase().slice(0, 14);
+  nameInput.style.display = 'block';
+  nameInput.style.left = (r.left + r.width / 2 - 110) + 'px';
+  nameInput.style.top  = (r.top + r.height * 0.66) + 'px';
+  nameInput.style.fontSize = Math.max(14, 18 * scale) + 'px';
+  nameInput.focus();
+  nameInput.select();
+}
+function closeNameEditorOnTitle(commit) {
+  if (commit) {
+    const raw = (nameInput.value || '').trim();
+    if (raw) {
+      const clean = raw.toUpperCase().replace(/[^A-Z0-9 _-]/g, '').slice(0, 14);
+      if (clean) localStorage.setItem(NAME_KEY, clean);
+    }
+  }
+  nameInput.style.display = 'none';
+  nameInput.blur();
+  enteringName = false;
+}
+
+function filterScores(period) {
+  const key = PERIOD_API[period];
+  const server = serverScores[key] || [];
+  // Online path: trust the server result (already top-10 for the period).
+  if (server.length || onlineMode) return server.slice(0, 10);
+  // Offline fallback: client-side filter of the local mirror.
+  const scores = loadLocalScores();
+  const now = Date.now();
+  const day = 86400000;
+  let cutoff;
+  switch (period) {
+    case 0: cutoff = now - day; break;
+    case 1: cutoff = now - 7 * day; break;
+    case 2: cutoff = now - 30 * day; break;
+    case 3: cutoff = new Date(new Date().getFullYear(), 0, 1).getTime(); break;
+    default: cutoff = 0; break;
+  }
+  return scores.filter(s => s.date >= cutoff).sort((a, b) => b.score - a.score).slice(0, 10);
+}
+
+function drawLeaderboard(yStart, currentScore) {
+  const scores = filterScores(leaderboardPeriod);
+  const cx = canvas.width / 2;
+  ctx.textAlign = 'center';
+  // Period tabs
+  ctx.font = '11px "Courier New", monospace';
+  const tabSpacing = 80;
+  const tabStartX = cx - (PERIOD_LABELS.length - 1) * tabSpacing / 2;
+  for (let i = 0; i < PERIOD_LABELS.length; i++) {
+    ctx.fillStyle = i === leaderboardPeriod ? '#00ff88' : '#004422';
+    ctx.fillText(PERIOD_LABELS[i], tabStartX + i * tabSpacing, yStart);
+  }
+  lbTapZone = { x1: tabStartX - 40, x2: tabStartX + (PERIOD_LABELS.length - 1) * tabSpacing + 40, y1: yStart - 12, y2: yStart + 6 };
+  ctx.fillStyle = '#005522';
+  ctx.font = '10px "Courier New", monospace';
+  ctx.fillText(isTouchDevice ? 'tap period to switch' : '[ ] change period', cx, yStart + 14);
+  // Header
+  ctx.fillStyle = '#00aa66';
+  ctx.font = 'bold 13px "Courier New", monospace';
+  ctx.fillText('\u2500\u2500 HIGH SCORES \u2500\u2500', cx, yStart + 32);
+  if (!onlineMode) {
+    ctx.fillStyle = '#aa6600';
+    ctx.font = '10px "Courier New", monospace';
+    ctx.fillText('OFFLINE \u2014 LOCAL CACHE', cx, yStart + 44);
+  }
+  // Score entries
+  ctx.font = '12px "Courier New", monospace';
+  if (scores.length === 0) {
+    ctx.fillStyle = '#004422';
+    ctx.fillText('No scores yet', cx, yStart + 52);
+  } else {
+    let highlighted = false;
+    for (let i = 0; i < Math.min(scores.length, 5); i++) {
+      const e = scores[i];
+      const hl = currentScore !== undefined && !highlighted && e.score === currentScore;
+      if (hl) highlighted = true;
+      ctx.fillStyle = hl ? '#00ff88' : '#00aa66';
+      const d = new Date(e.date);
+      const dateStr = (d.getMonth() + 1) + '/' + d.getDate();
+      const name = (e.name || 'ANON').padEnd(14).substring(0, 14);
+      ctx.fillText((i + 1) + '. ' + name + ' ' + ('' + e.score).padStart(6) + '  W' + e.wave + '  ' + dateStr, cx, yStart + 52 + i * 16);
+    }
+  }
+  ctx.textAlign = 'left';
+}
+
+// --- LAUNCHERS ---
+function makeLauncher(x) {
+  return { x, interceptorsLeft: 0, fireMode: 0, arming: false, armTimer: 0, resupplying: false, resupplyTimer: 0 };
+}
+let launchers = [makeLauncher(GAME_W / 2)];
+let activeLauncher = 0;
+const DUAL_LAUNCHER_WAVE = 4; // wave where second launcher appears
+
+// --- BUNKER RUN (starts one wave after dual launchers) ---
+// Wave introduces a periodic TBM event: 10s warning, 5s to reach bunker.
+// Player must commit to RUN while >5s remain. Failure = instant game over.
+const BUNKER_RUN_WAVE = 5;
+const BUNKER_WARNING_FRAMES = 600; // 10s at 60fps
+const BUNKER_RUN_FRAMES = 300;     // 5s to traverse
+const BUNKER_POST_FRAMES = 90;     // 1.5s impact/cutscene tail
+const BUNKER_X = 60;               // ground-x of bunker door
+const BUNKER_CHAR_START_X = GAME_W / 2;
+let bunkerPhase = 'idle';      // 'idle' | 'active' | 'post'
+let bunkerTimer = 0;           // active: warning countdown (frames remaining)
+let bunkerRunTimer = 0;        // 0 until RUN pressed, then frames since commit
+let bunkerOutcome = 'pending'; // 'pending' | 'safe' | 'hit'
+let bunkerPostTimer = 0;
+let bunkerSchedule = [];       // waveTimer frames at which to trigger events
+let bunkerDone = 0;
+const BTN_BUNKER_RUN = { x: GAME_W / 2 - 90, y: GAME_H / 2 - 40, w: 180, h: 70 };
+const BTN_CAMEL = { x: GAME_W - 150, y: 100, w: 135, h: 40 };
+
+// --- CAMEL RELIEF WAVE ---
+// Wave 6 is a bonus/relief wave: player taps sky (or presses C) to release
+// autonomous camels that walk the ground and spit at shaheds. A hit flips
+// the shahed into retreat (flies off upward). No intercepts earned here.
+const CAMEL_WAVE = 6;
+const CAMEL_POOL_START = 12;
+const CAMEL_SPIT_RANGE_X = 90;
+const CAMEL_SPIT_RANGE_Y = 320;
+const CAMEL_SPIT_COOLDOWN = 75;
+let camelMode = false;
+let camels = [];
+let camelSpits = [];
+let camelPool = 0;
+let camelReleaseTimer = 0;
+
+function makeCamel(fromLeft) {
+  const x = fromLeft ? -20 : GAME_W + 20;
+  return {
+    x, vx: (fromLeft ? 1 : -1) * (0.8 + Math.random() * 0.5),
+    bob: Math.random() * Math.PI * 2,
+    spitCooldown: 30 + Math.floor(Math.random() * 30),
+    age: 0
+  };
+}
+
+function releaseCamel() {
+  if (!camelMode || camelPool <= 0) return;
+  camels.push(makeCamel(Math.random() < 0.5));
+  camelPool--;
+}
+
+function updateCamels() {
+  if (!camelMode) return;
+  if (camelPool > 0) {
+    camelReleaseTimer--;
+    if (camelReleaseTimer <= 0) {
+      releaseCamel();
+      camelReleaseTimer = 150;
+    }
+  }
+  const groundY = canvas.height - 50;
+  for (const c of camels) {
+    c.age++;
+    c.bob += 0.25;
+    let target = null;
+    let bestDx = Infinity;
+    for (const s of shaheds) {
+      if (!s.alive || s.retreating) continue;
+      const adx = Math.abs(s.x - c.x);
+      if (adx < bestDx) { bestDx = adx; target = s; }
+    }
+    if (target) {
+      const dx = target.x - c.x;
+      if (Math.abs(dx) > 6) {
+        const dir = Math.sign(dx);
+        c.vx += dir * 0.08;
+        c.vx = Math.max(-1.6, Math.min(1.6, c.vx));
+      } else {
+        c.vx *= 0.55;
+      }
+    }
+    c.x += c.vx;
+    if (c.x < 12) { c.x = 12; c.vx = Math.abs(c.vx); }
+    if (c.x > canvas.width - 12) { c.x = canvas.width - 12; c.vx = -Math.abs(c.vx); }
+    c.spitCooldown--;
+    if (c.spitCooldown <= 0 && target
+        && Math.abs(target.x - c.x) < CAMEL_SPIT_RANGE_X
+        && (groundY - target.y) < CAMEL_SPIT_RANGE_Y) {
+      const dx = target.x - c.x;
+      const dy = target.y - (groundY - 14);
+      const dist = Math.max(40, Math.hypot(dx, dy));
+      const speed = 5.5;
+      camelSpits.push({
+        x: c.x + (c.vx >= 0 ? 14 : -14),
+        y: groundY - 24,
+        vx: (dx / dist) * speed,
+        vy: (dy / dist) * speed,
+        age: 0, alive: true
+      });
+      c.spitCooldown = CAMEL_SPIT_COOLDOWN;
+    }
+  }
+  for (const p of camelSpits) {
+    if (!p.alive) continue;
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.04;
+    p.age++;
+    if (p.age > 180 || p.y < -30 || p.y > canvas.height || p.x < -20 || p.x > canvas.width + 20) {
+      p.alive = false;
+      continue;
+    }
+    for (const s of shaheds) {
+      if (!s.alive || s.retreating) continue;
+      if (Math.hypot(s.x - p.x, s.y - p.y) < 22) {
+        s.retreating = true;
+        s.retreatVx = (Math.random() - 0.5) * 1.5;
+        s.retreatAccel = 0;
+        s.outcome = 'retreated';
+        p.alive = false;
+        score += 50;
+        break;
+      }
+    }
+  }
+  camelSpits = camelSpits.filter(p => p.alive);
+}
+
+function scheduleBunkerEvents() {
+  bunkerSchedule = [];
+  bunkerDone = 0;
+  bunkerPhase = 'idle';
+  bunkerOutcome = 'pending';
+  bunkerRunTimer = 0;
+  if (wave < BUNKER_RUN_WAVE) return;
+  if (wave === CAMEL_WAVE) return;
+  const count = Math.min(3, 1 + Math.floor((wave - BUNKER_RUN_WAVE) / 3));
+  const spawnInterval = Math.max(40, 120 - wave * 10);
+  const approxWaveFrames = (2 + wave * 2) * spawnInterval + 300;
+  const fracs = count === 1 ? [0.5] : count === 2 ? [0.33, 0.72] : [0.22, 0.53, 0.82];
+  for (const f of fracs) {
+    const jitter = Math.floor((Math.random() - 0.5) * 120);
+    bunkerSchedule.push(Math.max(120, Math.floor(approxWaveFrames * f) + jitter));
+  }
+}
+
+function startBunkerRun() {
+  if (bunkerPhase !== 'active') return;
+  if (bunkerRunTimer > 0) return;
+  bunkerRunTimer = 1;
+}
+
+function updateBunker() {
+  if (bunkerPhase === 'idle') {
+    if (bunkerDone < bunkerSchedule.length && waveTimer >= bunkerSchedule[bunkerDone]) {
+      bunkerPhase = 'active';
+      bunkerTimer = BUNKER_WARNING_FRAMES;
+      bunkerRunTimer = 0;
+      bunkerOutcome = 'pending';
+    }
+    return;
+  }
+  if (bunkerPhase === 'active') {
+    bunkerTimer--;
+    if (bunkerRunTimer > 0) bunkerRunTimer++;
+    if (bunkerTimer <= 0) {
+      bunkerOutcome = bunkerRunTimer >= BUNKER_RUN_FRAMES ? 'safe' : 'hit';
+      bunkerPhase = 'post';
+      bunkerPostTimer = BUNKER_POST_FRAMES;
+    }
+    return;
+  }
+  if (bunkerPhase === 'post') {
+    bunkerPostTimer--;
+    if (bunkerPostTimer <= 0) {
+      if (bunkerOutcome === 'hit') {
+        lives = 0;
+        state = GAME_OVER;
+        showNameInput();
+        trajectories = {
+          shaheds: shaheds.map(s => ({ path: s.path, outcome: s.outcome || 'impact' })),
+          interceptors: interceptors.map(i => ({ path: i.path, outcome: i.outcome || 'miss' }))
+        };
+        bunkerPhase = 'idle';
+        return;
+      }
+      bunkerPhase = 'idle';
+      bunkerDone++;
+      bunkerRunTimer = 0;
+      bunkerOutcome = 'pending';
+    }
+  }
+}
+
+function bunkerLocksFire() {
+  return (bunkerPhase === 'active' && bunkerRunTimer > 0) || bunkerPhase === 'post';
+}
+
+// --- SWEEP RADAR ---
+let sweepAngle = -Math.PI / 2; // starts pointing up
+const SWEEP_HZ = 0.25;         // 1/4 Hz — full rotation every 4 seconds
+const SWEEP_RATE = (Math.PI * 2 * SWEEP_HZ) / 60; // radians per frame at 60fps
+const SWEEP_WIDTH = Math.PI / 4; // 45 degree beamwidth
+const SWEEP_RANGE = 900;        // covers full game area
+const SWEEP_X = GAME_W / 2;
+const SWEEP_Y = GAME_H - 50;   // ground level
+
+function getLauncherAtX(x) {
+  if (launchers.length === 1) return 0;
+  return x < GAME_W / 2 ? 0 : 1;
+}
+
+function launcherMinX(li) {
+  if (launchers.length === 1) return 30;
+  return li === 0 ? 30 : GAME_W / 2 + 15;
+}
+function launcherMaxX(li) {
+  if (launchers.length === 1) return GAME_W - 30;
+  return li === 0 ? GAME_W / 2 - 15 : GAME_W - 30;
+}
+
+// --- INPUT ---
+let keys = {};
+let mouse = { x: 0, y: 0, down: false };
+let draggedRadar = -1;
+
+document.addEventListener('keydown', e => {
+  keys[e.code] = true;
+  if (e.code === 'Space' || e.code === 'ArrowLeft' || e.code === 'ArrowRight' || e.code === 'ArrowUp' || e.code === 'ArrowDown' || e.code === 'Tab') e.preventDefault();
+  if (e.code === 'Space' && spaceCooldown <= 0) {
+    // Dismiss freeze frame first, don't advance state
+    if (enteringName) { /* handled by input keydown */ }
+    else if (selectedSnapshot !== null) { selectedSnapshot = null; }
+    else if (state === TITLE) { startEmplacement(); spaceCooldown = 15; }
+    else if (state === EMPLACEMENT) { startCombat(); spaceCooldown = 15; }
+    else if (state === WAVE_END && waveEndTimer > 60) { startEmplacement(); spaceCooldown = 15; }
+    else if (state === GAME_OVER) {
+      // Return to TITLE (home) instead of auto-restarting the round.
+      // resetGame() runs implicitly when startEmplacement() fires from the
+      // next TITLE-state SPACE press.
+      state = TITLE;
+      spaceCooldown = 15;
+      refreshServerScores(leaderboardPeriod, true);
+    }
+    else if (state === COMBAT) { fireFromLauncher(activeLauncher); }
+  }
+  if (state === COMBAT && e.code === 'Tab') {
+    const L = launchers[activeLauncher];
+    L.fireMode = (L.fireMode + 1) % 3;
+    if (L.fireMode === 0) { L.arming = false; L.armTimer = 0; }
+  }
+  // Resupply with R key
+  if (state === COMBAT && e.code === 'KeyR') triggerResupply(activeLauncher);
+  // Switch active launcher with 1/2 keys
+  // Q toggles between launchers (wave 4+ only). Replaces the original 1/2
+  // keybinding so the off-hand can stay on the WASD cluster — Q sits one row
+  // above A so no hand-movement is needed mid-combat.
+  if (state === COMBAT && e.code === 'KeyQ' && launchers.length > 1) {
+    activeLauncher = (activeLauncher + 1) % launchers.length;
+  }
+  // Bunker RUN
+  if (state === COMBAT && e.code === 'KeyB') startBunkerRun();
+  // Camel relief wave — release a camel
+  if (state === COMBAT && camelMode && e.code === 'KeyC') releaseCamel();
+  // Leaderboard period switching
+  if ((state === TITLE || state === GAME_OVER) && e.code === 'BracketLeft') {
+    leaderboardPeriod = Math.max(0, leaderboardPeriod - 1);
+    refreshServerScores(leaderboardPeriod, true);
+  }
+  if ((state === TITLE || state === GAME_OVER) && e.code === 'BracketRight') {
+    leaderboardPeriod = Math.min(4, leaderboardPeriod + 1);
+    refreshServerScores(leaderboardPeriod, true);
+  }
+  // Dismiss freeze frame
+  if ((state === WAVE_END || state === GAME_OVER) && e.code === 'Escape') selectedSnapshot = null;
+});
+document.addEventListener('keyup', e => { keys[e.code] = false; });
+canvas.addEventListener('mousedown', e => { mouse.down = true; updateMouse(e); handleMouseDown(); });
+canvas.addEventListener('mousemove', e => { updateMouse(e); handleMouseMove(); });
+canvas.addEventListener('mouseup', e => { mouse.down = false; draggedRadar = -1; });
+
+function updateMouse(e) {
+  const r = canvas.getBoundingClientRect();
+  mouse.x = (e.clientX - r.left) * (canvas.width / r.width);
+  mouse.y = (e.clientY - r.top) * (canvas.height / r.height);
+}
+
+function handleMouseDown() {
+  if (state === TITLE) {
+    if (inBtn({ x: mouse.x, y: mouse.y }, BTN_EDIT_NAME)) { openNameEditorOnTitle(); return; }
+    if (inBtn({ x: mouse.x, y: mouse.y }, BTN_MP_LINK)) { window.location.href = '/mp'; return; }
+    if (ME.demo_admin && inBtn({ x: mouse.x, y: mouse.y }, BTN_DEMO)) { openFabricDemo(); return; }
+    return;
+  }
+  if (state === EMPLACEMENT) {
+    for (let i = radars.length - 1; i >= 0; i--) {
+      const r = radars[i];
+      const d = Math.hypot(mouse.x - r.x, mouse.y - r.y);
+      if (d < 20) { draggedRadar = i; return; }
+    }
+  }
+  // Click on launcher bar to fire (desktop)
+  if (state === COMBAT && mouse.y > GAME_H - 55) {
+    const li = getLauncherAtX(mouse.x);
+    fireFromLauncher(li);
+  }
+  // Kill point click in trajectory review
+  if ((state === WAVE_END || state === GAME_OVER) && killSnapshots.length > 0) {
+    if (selectedSnapshot !== null) {
+      selectedSnapshot = null;
+      return;
+    }
+    for (let ki = 0; ki < killSnapshots.length; ki++) {
+      const ks = killSnapshots[ki];
+      if (Math.hypot(mouse.x - ks.x, mouse.y - ks.y) < 18) {
+        selectedSnapshot = ki;
+        return;
+      }
+    }
+  }
+}
+
+function handleMouseMove() {
+  if (state !== EMPLACEMENT || draggedRadar < 0) return;
+  radars[draggedRadar].x = Math.max(40, Math.min(canvas.width - 40, mouse.x));
+  radars[draggedRadar].y = Math.max(100, Math.min(canvas.height - 120, mouse.y));
+}
+
+// --- ENTITIES ---
+let radars = [];
+let shaheds = [];
+let interceptors = [];
+let explosions = [];
+let blastWaves = [];
+let activeIdx = -1;
+let lastMultiKills = 0;
+let lbTapZone = null;
+let shahedsToSpawn = 0;
+let spawnTimer = 0;
+
+// --- TRAJECTORY RECORDING ---
+let trajectories = { shaheds: [], interceptors: [] };
+let killSnapshots = [];
+let selectedSnapshot = null;
+
+function recordKillSnapshot(killX, killY, kills, intIdx) {
+  killSnapshots.push({
+    x: killX, y: killY,
+    kills: kills,
+    score: score,
+    frame: waveTimer,
+    intIdx: intIdx,
+    shaheds: shaheds.map(s => ({ x: s.x, y: s.y, alive: s.alive, cruise: s.cruise, visible: s.visible, angle: s.angle || 0 })),
+    interceptors: interceptors.map(ic => ({ x: ic.x, y: ic.y, alive: ic.alive, armed: ic.armed, autoPilot: ic.autoPilot, vx: ic.vx, vy: ic.vy })),
+    radars: radars.map(r => ({ x: r.x, y: r.y, radius: r.radius }))
+  });
+}
+
+function makeRadar(x, y, radius) {
+  return { x, y, radius, pulse: Math.random() * Math.PI * 2 };
+}
+
+function makeShahed(wave, forceCruise) {
+  const cruise = forceCruise || false;
+  const patternType = Math.floor(Math.random() * 7);
+  const startX = 80 + Math.random() * (canvas.width - 160);
+  const baseSpeed = 0.6 + wave * 0.12 + Math.random() * 0.3;
+  const speed = cruise ? baseSpeed * 3 : baseSpeed;
+  const amplitude = cruise ? 25 + Math.random() * 35 : 40 + Math.random() * 60;
+  const frequency = 0.008 + Math.random() * 0.012;
+  const phase = Math.random() * Math.PI * 2;
+  const wobble = cruise ? 0.1 + Math.random() * 0.2 : 0.3 + Math.random() * 0.5;
+  return {
+    x: startX, y: -30,
+    baseX: startX,
+    speed,
+    pattern: patternType,
+    amplitude, frequency, phase, wobble,
+    cruise,
+    t: 0,
+    alive: true,
+    angle: 0,
+    visible: 0,
+    path: [],
+    outcome: null
+  };
+}
+
+function makeInterceptor(armed, autoPilot, fromX) {
+  return {
+    x: fromX,
+    y: canvas.height - 60,
+    vx: 0,
+    vy: -3.5,
+    alive: true,
+    armed: armed || false,
+    autoPilot: autoPilot || false,
+    trail: [],
+    age: 0,
+    path: [],
+    outcome: null
+  };
+}
+
+function makeExplosion(x, y, color) {
+  const particles = [];
+  for (let i = 0; i < 16; i++) {
+    const a = (Math.PI * 2 * i) / 16 + Math.random() * 0.3;
+    const s = 1.5 + Math.random() * 3;
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 1 });
+  }
+  return { particles, color };
+}
+
+// --- BLAST WAVE EFFECT ---
+function addBlastWave(x, y) {
+  blastWaves.push({ x, y, radius: 0, maxRadius: PROX_RADIUS, life: 1 });
+}
+
+function drawBlastWaves() {
+  for (let i = blastWaves.length - 1; i >= 0; i--) {
+    const bw = blastWaves[i];
+    bw.radius += (bw.maxRadius - bw.radius) * 0.15;
+    bw.life -= 0.03;
+    if (bw.life <= 0) { blastWaves.splice(i, 1); continue; }
+    ctx.beginPath();
+    ctx.arc(bw.x, bw.y, bw.radius, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(0, 255, 120, ' + (bw.life * 0.5) + ')';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(0, 255, 120, ' + (bw.life * 0.05) + ')';
+    ctx.fill();
+  }
+}
+
+// Test support — step combat by N frames without rendering
+window._testStep = function(n) { for (let f = 0; f < (n || 1); f++) if (state === COMBAT) updateCombat(); };
+
+// --- SHAHED FLIGHT PATTERNS ---
+function updateShahed(s) {
+  s.t++;
+  if (s.retreating) {
+    s.retreatAccel = (s.retreatAccel || 0) + 0.025;
+    s.y -= 2.5 + s.retreatAccel;
+    s.x += (s.retreatVx || 0);
+    s.angle = Math.PI; // nose up
+    if (s.t % 3 === 0) s.path.push({ x: s.x, y: s.y });
+    if (s.y < -40) { s.alive = false; }
+    s.visible = 0.9;
+    return;
+  }
+  const t = s.t;
+  switch (s.pattern) {
+    case 0: // sinusoidal
+      s.x = s.baseX + Math.sin(t * s.frequency + s.phase) * s.amplitude;
+      break;
+    case 1: // zigzag
+      const period = 120 / s.frequency;
+      const zigPhase = ((t + s.phase * 100) % period) / period;
+      s.x = s.baseX + (zigPhase < 0.5 ? zigPhase * 2 - 0.5 : 1.5 - zigPhase * 2) * s.amplitude;
+      break;
+    case 2: // spiral/corkscrew approach
+      s.x = s.baseX + Math.sin(t * s.frequency * 1.5 + s.phase) * s.amplitude * Math.min(1, t / 200);
+      break;
+    case 3: // jinking (random direction changes)
+      if (t % (50 + Math.floor(Math.random() * 30)) < 2) {
+        s.baseX += (Math.random() - 0.5) * s.amplitude * 0.6;
+        s.baseX = Math.max(40, Math.min(canvas.width - 40, s.baseX));
+      }
+      s.x += (s.baseX - s.x) * 0.03;
+      break;
+    case 4: // straight down — no lateral movement
+      s.x = s.baseX;
+      break;
+    case 5: // diagonal — steady drift to one side
+      if (!s.drift) s.drift = (Math.random() < 0.5 ? -1 : 1) * (0.3 + Math.random() * 0.5);
+      s.x = s.baseX + s.drift * t;
+      break;
+    case 6: // diving S-curve — one big S then straight
+      if (t < 200) {
+        s.x = s.baseX + Math.sin(t * 0.015 + s.phase) * s.amplitude * 1.5;
+      }
+      // else holds last x position (goes straight)
+      break;
+  }
+  // Add wobble noise
+  s.x += Math.sin(t * 0.07 + s.phase * 3) * s.wobble * 3;
+  s.y += s.speed;
+  // Calculate angle from movement — nose points in direction of travel
+  const dx = s.x - (s.prevX || s.x);
+  const dy = s.speed;
+  s.angle = Math.atan2(dx, dy) + Math.PI;
+  s.prevX = s.x;
+  // Clamp
+  s.x = Math.max(20, Math.min(canvas.width - 20, s.x));
+  // Check radar visibility — circular radars + sweep radar
+  let maxVis = 0;
+  for (const r of radars) {
+    const d = Math.hypot(s.x - r.x, s.y - r.y);
+    if (d < r.radius) {
+      maxVis = Math.max(maxVis, 1 - (d / r.radius) * 0.3);
+    }
+  }
+  // Sweep radar — check if target is in the beam cone
+  if (state === COMBAT) {
+    const sdx = s.x - SWEEP_X;
+    const sdy = s.y - SWEEP_Y;
+    const targetAngle = Math.atan2(sdy, sdx);
+    let diff = targetAngle - sweepAngle;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    if (Math.abs(diff) < SWEEP_WIDTH / 2) {
+      maxVis = Math.max(maxVis, 0.9);
+    }
+  }
+  s.visible += (maxVis - s.visible) * 0.1;
+  if (maxVis === 0) s.visible *= 0.93;
+  // Record trajectory
+  if (s.t % 3 === 0) s.path.push({ x: s.x, y: s.y });
+}
+
+// --- DRAWING ---
+function drawShahedShape(x, y, angle, alpha) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.globalAlpha = alpha;
+  // Shahed-like delta wing silhouette
+  ctx.fillStyle = '#555';
+  ctx.strokeStyle = alpha > 0.5 ? '#999' : '#444';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  // Nose (pointed, facing direction of travel)
+  ctx.moveTo(0, -18);
+  // Right fuselage
+  ctx.lineTo(3, -10);
+  // Right wing (swept delta)
+  ctx.lineTo(22, 6);
+  ctx.lineTo(20, 8);
+  ctx.lineTo(5, 4);
+  // Right tail
+  ctx.lineTo(4, 14);
+  ctx.lineTo(10, 18);
+  ctx.lineTo(8, 19);
+  ctx.lineTo(3, 15);
+  // Left tail
+  ctx.lineTo(-3, 15);
+  ctx.lineTo(-8, 19);
+  ctx.lineTo(-10, 18);
+  ctx.lineTo(-4, 14);
+  // Left wing
+  ctx.lineTo(-5, 4);
+  ctx.lineTo(-20, 8);
+  ctx.lineTo(-22, 6);
+  ctx.lineTo(-3, -10);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  // Engine glow at rear
+  if (alpha > 0.3) {
+    ctx.fillStyle = `rgba(255, 120, 40, ${alpha * 0.5})`;
+    ctx.beginPath();
+    ctx.arc(0, 16, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawCruiseShape(x, y, angle, alpha) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.globalAlpha = alpha;
+  // Cruise missile — longer, narrower fuselage with stubby wings
+  ctx.fillStyle = '#774';
+  ctx.strokeStyle = alpha > 0.5 ? '#bb8' : '#554';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  // Nose (sharp ogive)
+  ctx.moveTo(0, -22);
+  ctx.lineTo(2, -16);
+  ctx.lineTo(3, -8);
+  // Right wing (short, swept)
+  ctx.lineTo(14, 2);
+  ctx.lineTo(12, 4);
+  ctx.lineTo(3, 1);
+  // Fuselage continues
+  ctx.lineTo(3, 10);
+  // Right tail fin
+  ctx.lineTo(8, 14);
+  ctx.lineTo(7, 15);
+  ctx.lineTo(3, 12);
+  // Left tail fin
+  ctx.lineTo(-3, 12);
+  ctx.lineTo(-7, 15);
+  ctx.lineTo(-8, 14);
+  ctx.lineTo(-3, 10);
+  // Left wing
+  ctx.lineTo(-3, 1);
+  ctx.lineTo(-12, 4);
+  ctx.lineTo(-14, 2);
+  ctx.lineTo(-3, -8);
+  ctx.lineTo(-2, -16);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  // Bright engine exhaust — bigger than shahed
+  if (alpha > 0.3) {
+    ctx.fillStyle = `rgba(255, 200, 60, ${alpha * 0.7})`;
+    ctx.beginPath();
+    ctx.arc(0, 14, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = `rgba(255, 100, 20, ${alpha * 0.4})`;
+    ctx.beginPath();
+    ctx.arc(0, 18, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawInterceptor(int, isActive) {
+  // Proximity rings for armed interceptors
+  if (int.armed) {
+    // Outer blast radius
+    ctx.beginPath();
+    ctx.arc(int.x, int.y, PROX_RADIUS, 0, Math.PI * 2);
+    ctx.strokeStyle = int.autoPilot
+      ? (isActive ? 'rgba(255, 100, 0, 0.12)' : 'rgba(255, 100, 0, 0.06)')
+      : (isActive ? 'rgba(255, 200, 50, 0.12)' : 'rgba(255, 200, 50, 0.06)');
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // Inner trigger radius
+    ctx.beginPath();
+    ctx.arc(int.x, int.y, PROX_TRIGGER, 0, Math.PI * 2);
+    ctx.strokeStyle = int.autoPilot
+      ? (isActive ? 'rgba(255, 100, 0, 0.25)' : 'rgba(255, 100, 0, 0.12)')
+      : (isActive ? 'rgba(255, 200, 50, 0.25)' : 'rgba(255, 200, 50, 0.12)');
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  // Detection radius ring for autopilot
+  if (int.autoPilot) {
+    ctx.beginPath();
+    ctx.arc(int.x, int.y, AUTOPILOT_DETECT_RADIUS, 0, Math.PI * 2);
+    ctx.strokeStyle = isActive ? 'rgba(255, 100, 0, 0.12)' : 'rgba(255, 100, 0, 0.06)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([8, 6]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.save();
+  ctx.translate(int.x, int.y);
+  const angle = Math.atan2(int.vx, -int.vy);
+  ctx.rotate(angle);
+  // Rocket body — unarmed=green, armed=yellow, autopilot=orange
+  ctx.fillStyle = int.autoPilot
+    ? (isActive ? '#ff6600' : '#aa4400')
+    : int.armed
+      ? (isActive ? '#ffcc00' : '#aa8800')
+      : (isActive ? '#00ffaa' : '#008866');
+  ctx.strokeStyle = int.autoPilot
+    ? (isActive ? '#ff8833' : '#cc5500')
+    : int.armed
+      ? (isActive ? '#ffee66' : '#ccaa33')
+      : (isActive ? '#aaffdd' : '#44aa88');
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, -12); // nose
+  ctx.lineTo(3, -4);
+  ctx.lineTo(3, 6);
+  ctx.lineTo(6, 10); // fin right
+  ctx.lineTo(3, 8);
+  ctx.lineTo(3, 10);
+  ctx.lineTo(-3, 10);
+  ctx.lineTo(-3, 8);
+  ctx.lineTo(-6, 10); // fin left
+  ctx.lineTo(-3, 6);
+  ctx.lineTo(-3, -4);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  // Exhaust flame
+  ctx.fillStyle = `rgba(255, ${150 + Math.random() * 100}, 30, 0.8)`;
+  ctx.beginPath();
+  ctx.moveTo(-2, 10);
+  ctx.lineTo(0, 14 + Math.random() * 6);
+  ctx.lineTo(2, 10);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+  // Trail
+  if (int.trail.length > 1) {
+    ctx.beginPath();
+    ctx.moveTo(int.trail[0].x, int.trail[0].y);
+    for (let i = 1; i < int.trail.length; i++) {
+      ctx.lineTo(int.trail[i].x, int.trail[i].y);
+    }
+    ctx.strokeStyle = `rgba(${isActive ? '0,255,170' : '0,136,102'}, 0.15)`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+}
+
+function drawRadar(r, phase) {
+  r.pulse += 0.02;
+  // Detection range circle
+  ctx.beginPath();
+  ctx.arc(r.x, r.y, r.radius, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(0, 200, 100, 0.15)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  // Sweep pulse
+  const pulseR = (r.pulse % (Math.PI * 2)) / (Math.PI * 2) * r.radius;
+  ctx.beginPath();
+  ctx.arc(r.x, r.y, pulseR, 0, Math.PI * 2);
+  ctx.strokeStyle = `rgba(0, 255, 120, ${0.3 * (1 - pulseR / r.radius)})`;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  // Center dish
+  ctx.beginPath();
+  ctx.arc(r.x, r.y, 8, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0, 200, 100, 0.4)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0, 255, 120, 0.7)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  // Cross
+  ctx.beginPath();
+  ctx.moveTo(r.x - 5, r.y); ctx.lineTo(r.x + 5, r.y);
+  ctx.moveTo(r.x, r.y - 5); ctx.lineTo(r.x, r.y + 5);
+  ctx.strokeStyle = 'rgba(0, 255, 120, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+function drawSweepRadar() {
+  if (state !== COMBAT && state !== WAVE_END && state !== GAME_OVER) return;
+  // Beam cone
+  const startAngle = sweepAngle - SWEEP_WIDTH / 2;
+  const endAngle = sweepAngle + SWEEP_WIDTH / 2;
+  // Gradient fill — brighter at center, fades at edges
+  const grad = ctx.createRadialGradient(SWEEP_X, SWEEP_Y, 0, SWEEP_X, SWEEP_Y, SWEEP_RANGE);
+  grad.addColorStop(0, 'rgba(0, 255, 100, 0.08)');
+  grad.addColorStop(0.6, 'rgba(0, 255, 100, 0.03)');
+  grad.addColorStop(1, 'rgba(0, 255, 100, 0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(SWEEP_X, SWEEP_Y);
+  ctx.arc(SWEEP_X, SWEEP_Y, SWEEP_RANGE, startAngle, endAngle);
+  ctx.closePath();
+  ctx.fill();
+  // Leading edge — bright line
+  ctx.strokeStyle = 'rgba(0, 255, 120, 0.25)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(SWEEP_X, SWEEP_Y);
+  ctx.lineTo(SWEEP_X + Math.cos(endAngle) * SWEEP_RANGE, SWEEP_Y + Math.sin(endAngle) * SWEEP_RANGE);
+  ctx.stroke();
+  // Radar origin pip
+  ctx.beginPath();
+  ctx.arc(SWEEP_X, SWEEP_Y, 5, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0, 200, 100, 0.5)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0, 255, 120, 0.7)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+function drawGround() {
+  const gy = canvas.height - 50;
+  ctx.fillStyle = '#0d1a0d';
+  ctx.fillRect(0, gy, canvas.width, 50);
+  ctx.strokeStyle = '#1a3a1a';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, gy);
+  ctx.lineTo(canvas.width, gy);
+  ctx.stroke();
+  // Divider line if dual launchers
+  if (launchers.length > 1 && state === COMBAT) {
+    ctx.strokeStyle = '#1a3a1a';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(GAME_W / 2, gy);
+    ctx.lineTo(GAME_W / 2, canvas.height);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // Draw each launcher
+  for (let li = 0; li < launchers.length; li++) {
+    const L = launchers[li];
+    const isActive = li === activeLauncher;
+    const padColor = isActive ? '#2a4a2a' : '#152015';
+    const borderColor = isActive ? '#3a6a3a' : '#1a3a1a';
+    // Pad base
+    ctx.fillStyle = padColor;
+    ctx.fillRect(L.x - 25, gy, 50, 10);
+    ctx.strokeStyle = borderColor;
+    ctx.lineWidth = isActive ? 2 : 1;
+    ctx.strokeRect(L.x - 25, gy, 50, 10);
+    // Indicator triangle
+    ctx.fillStyle = borderColor;
+    ctx.beginPath();
+    ctx.moveTo(L.x, gy - 5);
+    ctx.lineTo(L.x - 5, gy);
+    ctx.lineTo(L.x + 5, gy);
+    ctx.closePath();
+    ctx.fill();
+    // Launcher number label
+    if (launchers.length > 1) {
+      ctx.fillStyle = isActive ? '#4a8a4a' : '#1a3a1a';
+      ctx.font = '10px "Courier New", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(li + 1, L.x, gy + 20);
+      ctx.textAlign = 'left';
+    }
+  }
+}
+
+function drawHUD() {
+  const AL = launchers[activeLauncher];
+  ctx.fillStyle = '#00cc66';
+  ctx.font = '14px "Courier New", monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText(`WAVE ${wave}`, 15, 25);
+  ctx.fillText(`SCORE ${score}`, 15, 45);
+  ctx.textAlign = 'right';
+  ctx.fillText(`LIVES ${'\u2588'.repeat(Math.max(0, lives))}${'_'.repeat(Math.max(0, 5 - lives))}`, canvas.width - 15, 25);
+  // Per-launcher interceptor counts
+  const aliveInts = interceptors.filter(i => i.alive).length;
+  const totalLeft = launchers.reduce((s, L) => s + L.interceptorsLeft, 0);
+  ctx.fillText(`INTERCEPTORS ${aliveInts} / ${totalLeft + aliveInts}`, canvas.width - 15, 45);
+  // Active interceptor indicator
+  if (activeIdx >= 0 && interceptors[activeIdx] && interceptors[activeIdx].alive) {
+    ctx.fillText(`GUIDING #${activeIdx + 1}`, canvas.width - 15, 65);
+  }
+  ctx.textAlign = 'left';
+  // Incoming count
+  const aliveShaheds = shaheds.filter(s => s.alive).length;
+  ctx.fillText(`INCOMING ${aliveShaheds + shahedsToSpawn}`, 15, 65);
+  // Mode indicator for active launcher
+  const modeLabels = ['MODE: UNARMED [direct]', 'MODE: ARMED [proximity]', 'MODE: AUTOPILOT [seek]'];
+  const modeColors = ['#00cc66', '#ffcc00', '#ff6600'];
+  ctx.fillStyle = modeColors[AL.fireMode];
+  const launcherLabel = launchers.length > 1 ? ` (L${activeLauncher + 1})` : '';
+  ctx.fillText(modeLabels[AL.fireMode] + launcherLabel, 15, 85);
+  // Per-launcher interceptor counts in ground bar
+  if (launchers.length > 1) {
+    ctx.font = '11px "Courier New", monospace';
+    for (let li = 0; li < launchers.length; li++) {
+      const L = launchers[li];
+      const isActive = li === activeLauncher;
+      ctx.fillStyle = isActive ? '#4a8a4a' : '#1a3a1a';
+      ctx.textAlign = 'center';
+      ctx.fillText(`${L.interceptorsLeft} left`, L.x, canvas.height - 6);
+    }
+    ctx.textAlign = 'left';
+  }
+  // Arming progress circles — one per launcher
+  for (let li = 0; li < launchers.length; li++) {
+    const L = launchers[li];
+    if (!L.arming) continue;
+    const cx = L.x;
+    const cy = canvas.height - 80;
+    const requiredTime = L.fireMode === 2 ? AUTOPILOT_ARM_TIME : ARM_TIME;
+    const progress = L.armTimer / requiredTime;
+    const isAutoPilot = L.fireMode === 2;
+    const ringColor = isAutoPilot ? 'rgba(255, 100, 0, 0.3)' : 'rgba(255, 200, 50, 0.3)';
+    const arcColor = isAutoPilot ? '#ff6600' : '#ffcc00';
+    ctx.beginPath();
+    ctx.arc(cx, cy, 16, 0, Math.PI * 2);
+    ctx.strokeStyle = ringColor;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy, 16, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+    ctx.strokeStyle = arcColor;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = arcColor;
+    ctx.font = '10px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(isAutoPilot ? 'AUTO' : 'ARMING', cx, cy - 22);
+    ctx.textAlign = 'left';
+  }
+  // Resupply progress circles — per launcher
+  for (let li = 0; li < launchers.length; li++) {
+    const L = launchers[li];
+    if (!L.resupplying) continue;
+    const cx = L.x;
+    const cy = canvas.height - 80;
+    const progress = L.resupplyTimer / RESUPPLY_TIME;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 16, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(60, 160, 255, 0.3)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(cx, cy, 16, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+    ctx.strokeStyle = '#3ca0ff';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = '#3ca0ff';
+    ctx.font = '10px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('RESUPPLY', cx, cy - 22);
+    ctx.textAlign = 'left';
+  }
+}
+
+function btnRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.arcTo(x + w, y + h, x + w - r, y + h, r);
+  ctx.lineTo(x + r, y + h);
+  ctx.arcTo(x, y + h, x, y + h - r, r);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.closePath();
+}
+
+function drawTouchButtons() {
+  if (!isTouchDevice || state !== COMBAT) return;
+  const AL = launchers[activeLauncher];
+  // Mode cycle button — prominent, tappable
+  const b = BTN.mode;
+  const modeLabelsShort = ['UNARMED', 'ARMED', 'AUTOPILOT'];
+  const modeColors = ['#00cc66', '#ffcc00', '#ff6600'];
+  const mc = modeColors[AL.fireMode];
+  ctx.shadowColor = mc;
+  ctx.shadowBlur = 8;
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.strokeStyle = mc;
+  ctx.lineWidth = 2;
+  btnRect(b.x, b.y, b.w, b.h, 8);
+  ctx.fill();
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = mc;
+  ctx.font = 'bold 15px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  const launcherTag = launchers.length > 1 ? ` L${activeLauncher + 1}` : '';
+  ctx.fillText('\u25B6 ' + modeLabelsShort[AL.fireMode] + launcherTag, b.x + b.w / 2, b.y + b.h / 2 + 5);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+  ctx.font = '10px "Courier New", monospace';
+  ctx.fillText('tap to cycle', b.x + b.w / 2, b.y + b.h + 13);
+  ctx.textAlign = 'left';
+
+  // Resupply button
+  const rb = BTN.resupply;
+  const resupplying = AL.resupplying;
+  const resColor = resupplying ? '#3ca0ff' : '#00aaff';
+  ctx.shadowColor = resColor;
+  ctx.shadowBlur = 8;
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.strokeStyle = resColor;
+  ctx.lineWidth = 2;
+  btnRect(rb.x, rb.y, rb.w, rb.h, 8);
+  ctx.fill();
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = resColor;
+  ctx.font = 'bold 15px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  if (resupplying) {
+    const pct = Math.floor((AL.resupplyTimer / RESUPPLY_TIME) * 100);
+    ctx.fillText('RESUPPLYING ' + pct + '%', rb.x + rb.w / 2, rb.y + rb.h / 2 + 5);
+  } else {
+    ctx.fillText('RESUPPLY [R]', rb.x + rb.w / 2, rb.y + rb.h / 2 + 5);
+  }
+  ctx.textAlign = 'left';
+
+  // Switch launcher button (only when dual launchers)
+  if (launchers.length > 1) {
+    const sb = BTN.switchLauncher;
+    ctx.shadowColor = '#44ccff';
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+    ctx.strokeStyle = '#44ccff';
+    ctx.lineWidth = 2;
+    btnRect(sb.x, sb.y, sb.w, sb.h, 8);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = '#44ccff';
+    ctx.font = 'bold 15px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    const otherL = activeLauncher === 0 ? 2 : 1;
+    ctx.fillText('L' + (activeLauncher + 1) + ' \u2194 L' + otherL, sb.x + sb.w / 2, sb.y + sb.h / 2 + 5);
+    ctx.textAlign = 'left';
+  }
+}
+
+function drawStars() {
+  if (!drawStars.cache) {
+    drawStars.cache = [];
+    for (let i = 0; i < 80; i++) {
+      drawStars.cache.push({
+        x: Math.random() * canvas.width,
+        y: Math.random() * (canvas.height - 60),
+        b: 0.2 + Math.random() * 0.5,
+        s: Math.random() * 1.5
+      });
+    }
+  }
+  for (const s of drawStars.cache) {
+    ctx.fillStyle = `rgba(200, 220, 255, ${s.b + Math.sin(Date.now() * 0.001 + s.x) * 0.1})`;
+    ctx.fillRect(s.x, s.y, s.s, s.s);
+  }
+}
+
+function drawTrajectories() {
+  // Draw shahed paths
+  for (const t of trajectories.shaheds) {
+    if (t.path.length < 2) continue;
+    ctx.beginPath();
+    ctx.moveTo(t.path[0].x, t.path[0].y);
+    for (let i = 1; i < t.path.length; i++) ctx.lineTo(t.path[i].x, t.path[i].y);
+    ctx.strokeStyle = t.outcome === 'intercepted'
+      ? 'rgba(0, 200, 100, 0.5)'   // green = intercepted
+      : 'rgba(255, 60, 30, 0.6)';  // red = impact
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // End marker
+    const end = t.path[t.path.length - 1];
+    ctx.fillStyle = t.outcome === 'intercepted' ? '#00cc66' : '#ff3322';
+    ctx.beginPath();
+    ctx.arc(end.x, end.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Draw interceptor paths
+  for (const t of trajectories.interceptors) {
+    if (t.path.length < 2) continue;
+    ctx.beginPath();
+    ctx.moveTo(t.path[0].x, t.path[0].y);
+    for (let i = 1; i < t.path.length; i++) ctx.lineTo(t.path[i].x, t.path[i].y);
+    ctx.strokeStyle = t.outcome === 'hit'
+      ? 'rgba(0, 180, 255, 0.5)'    // blue = successful hit
+      : 'rgba(100, 100, 100, 0.3)'; // grey = miss
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // Kill point markers — clickable
+  for (let ki = 0; ki < killSnapshots.length; ki++) {
+    const ks = killSnapshots[ki];
+    const selected = selectedSnapshot === ki;
+    const pulse = Math.sin(Date.now() * 0.005) * 0.3 + 0.7;
+    // Outer ring to indicate clickable
+    ctx.beginPath();
+    ctx.arc(ks.x, ks.y, selected ? 12 : 8, 0, Math.PI * 2);
+    ctx.strokeStyle = selected ? 'rgba(0, 255, 180, 0.9)' : 'rgba(0, 255, 120, ' + (pulse * 0.6) + ')';
+    ctx.lineWidth = selected ? 2.5 : 1.5;
+    ctx.stroke();
+    // Kill count badge
+    if (ks.kills > 1) {
+      ctx.fillStyle = '#ffcc00';
+      ctx.font = 'bold 10px "Courier New", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('x' + ks.kills, ks.x, ks.y - 12);
+      ctx.textAlign = 'left';
+    }
+  }
+  // Legend
+  ctx.textAlign = 'left';
+  ctx.font = '11px "Courier New", monospace';
+  ctx.fillStyle = '#00cc66'; ctx.fillText('\u2500\u2500 intercepted', 15, canvas.height - 30);
+  ctx.fillStyle = '#ff3322'; ctx.fillText('\u2500\u2500 impact', 130, canvas.height - 30);
+  ctx.fillStyle = '#00b4ff'; ctx.fillText('\u2500\u2500 hit', 220, canvas.height - 30);
+  ctx.fillStyle = '#666';    ctx.fillText('\u2500\u2500 miss', 280, canvas.height - 30);
+  if (killSnapshots.length > 0 && selectedSnapshot === null) {
+    ctx.fillStyle = '#00aa66';
+    ctx.fillText(isTouchDevice ? 'tap kill markers for freeze frame' : 'click kill markers for freeze frame', 350, canvas.height - 30);
+  }
+}
+
+function drawFreezeFrame(snap) {
+  // Dim overlay
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  // Draw radars from snapshot
+  for (const r of snap.radars) {
+    ctx.beginPath();
+    ctx.arc(r.x, r.y, r.radius, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(0, 200, 100, 0.15)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(r.x, r.y, 8, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0, 200, 100, 0.3)';
+    ctx.fill();
+  }
+  // Blast radius at kill point
+  ctx.beginPath();
+  ctx.arc(snap.x, snap.y, PROX_RADIUS, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(0, 255, 120, 0.25)';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 4]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(0, 255, 120, 0.04)';
+  ctx.fill();
+  // Trigger radius
+  ctx.beginPath();
+  ctx.arc(snap.x, snap.y, PROX_TRIGGER, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255, 200, 50, 0.3)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  // Draw only shaheds that were alive at this moment
+  for (const s of snap.shaheds) {
+    if (!s.alive) continue; // skip already-dead shaheds
+    const inBlast = Math.hypot(s.x - snap.x, s.y - snap.y) < PROX_RADIUS;
+    if (s.cruise) {
+      drawCruiseShape(s.x, s.y, s.angle, 0.8);
+    } else {
+      drawShahedShape(s.x, s.y, s.angle, 0.8);
+    }
+    // Highlight targets about to die (within blast radius)
+    if (inBlast) {
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, 18, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255, 60, 30, 0.9)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(255, 60, 30, 0.15)';
+      ctx.fill();
+      // Target label
+      ctx.fillStyle = '#ff4422';
+      ctx.font = '10px "Courier New", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('KILL', s.x, s.y - 22);
+      ctx.textAlign = 'left';
+    }
+  }
+  // Draw only alive interceptors from snapshot
+  for (let ii = 0; ii < snap.interceptors.length; ii++) {
+    const ic = snap.interceptors[ii];
+    if (!ic.alive && ii !== snap.intIdx) continue;
+    const isKiller = ii === snap.intIdx;
+    ctx.save();
+    ctx.translate(ic.x, ic.y);
+    const angle = Math.atan2(ic.vx, -ic.vy);
+    ctx.rotate(angle);
+    ctx.fillStyle = isKiller ? '#00ffaa' : (ic.autoPilot ? '#aa4400' : ic.armed ? '#aa8800' : '#008866');
+    ctx.strokeStyle = isKiller ? '#aaffdd' : '#446';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, -12);
+    ctx.lineTo(3, -4); ctx.lineTo(3, 6); ctx.lineTo(6, 10);
+    ctx.lineTo(3, 8); ctx.lineTo(3, 10); ctx.lineTo(-3, 10);
+    ctx.lineTo(-3, 8); ctx.lineTo(-6, 10); ctx.lineTo(-3, 6);
+    ctx.lineTo(-3, -4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+  // Kill point marker
+  ctx.beginPath();
+  ctx.arc(snap.x, snap.y, 6, 0, Math.PI * 2);
+  ctx.fillStyle = '#00ff88';
+  ctx.fill();
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  // Info panel
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+  ctx.fillRect(10, 10, 220, 70);
+  ctx.strokeStyle = '#00aa66';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(10, 10, 220, 70);
+  ctx.fillStyle = '#00ff88';
+  ctx.font = 'bold 14px "Courier New", monospace';
+  ctx.textAlign = 'left';
+  ctx.fillText('FREEZE FRAME', 20, 30);
+  ctx.font = '12px "Courier New", monospace';
+  ctx.fillStyle = '#00aa66';
+  ctx.fillText('Kills: ' + snap.kills + (snap.kills > 1 ? ' (MULTI-KILL)' : ''), 20, 48);
+  ctx.fillText('Score at kill: ' + snap.score, 20, 64);
+  // Dismiss hint
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#005522';
+  ctx.font = '11px "Courier New", monospace';
+  ctx.fillText(isTouchDevice ? 'tap elsewhere to dismiss' : 'click elsewhere or ESC to dismiss', canvas.width / 2, canvas.height - 12);
+  ctx.textAlign = 'left';
+}
+
+function drawExplosions() {
+  for (let e = explosions.length - 1; e >= 0; e--) {
+    const ex = explosions[e];
+    let allDead = true;
+    for (const p of ex.particles) {
+      if (p.life <= 0) continue;
+      allDead = false;
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vx *= 0.97;
+      p.vy *= 0.97;
+      p.life -= 0.02;
+      ctx.fillStyle = ex.color === 'green'
+        ? `rgba(0, 255, 120, ${p.life})`
+        : `rgba(255, ${Math.floor(120 * p.life)}, 30, ${p.life})`;
+      ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+    }
+    if (allDead) explosions.splice(e, 1);
+  }
+}
+
+// --- GAME LOGIC ---
+function resetGame() {
+  hideNameInput();
+  if (!scoreSaved && score > 0) saveScore(score, wave, nameInput.value.trim() || 'ANON');
+  wave = cheatStartWave - 1;
+  score = 0;
+  lives = 5;
+  intercepts = 0;
+  lifeUpFlash = 0;
+  bunkerPhase = 'idle';
+  bunkerSchedule = [];
+  bunkerDone = 0;
+  bunkerRunTimer = 0;
+  bunkerOutcome = 'pending';
+  camelMode = false;
+  camels = [];
+  camelSpits = [];
+  camelPool = 0;
+  camelReleaseTimer = 0;
+  radars = [];
+  shaheds = [];
+  interceptors = [];
+  explosions = [];
+  blastWaves = [];
+  activeIdx = -1;
+  lastMultiKills = 0;
+  killSnapshots = [];
+  selectedSnapshot = null;
+  scoreSaved = false;
+  currentPhrase = '';
+  confetti.length = 0;
+  celebrationTimer = 0;
+  launchers = [makeLauncher(GAME_W / 2)];
+  activeLauncher = 0;
+  startEmplacement();
+}
+
+function startEmplacement() {
+  wave++;
+  state = EMPLACEMENT;
+  shaheds = [];
+  interceptors = [];
+  activeIdx = -1;
+  emplacementReady = false;
+  // Add second launcher at wave 4
+  if (wave >= DUAL_LAUNCHER_WAVE && launchers.length < 2) {
+    launchers[0].x = GAME_W * 0.25;
+    launchers.push(makeLauncher(GAME_W * 0.75));
+  }
+  // Add radars if needed
+  const radarCount = Math.min(3 + Math.floor((wave - 1) / 2), 6);
+  while (radars.length < radarCount) {
+    radars.push(makeRadar(
+      100 + Math.random() * (canvas.width - 200),
+      150 + Math.random() * (canvas.height - 350),
+      90 + Math.min(wave * 3, 30)
+    ));
+  }
+  // Grow existing radar range slightly each wave
+  for (const r of radars) {
+    r.radius = Math.min(90 + wave * 4, 140);
+  }
+}
+
+function startCombat() {
+  state = COMBAT;
+  camelMode = (wave === CAMEL_WAVE);
+  camels = [];
+  camelSpits = [];
+  camelPool = camelMode ? CAMEL_POOL_START : 0;
+  camelReleaseTimer = camelMode ? 45 : 0;
+  shahedsToSpawn = camelMode ? 20 : (2 + wave * 2);
+  spawnTimer = 0;
+  const totalInterceptors = Math.ceil(shahedsToSpawn * 1.5);
+  shaheds = [];
+  interceptors = [];
+  activeIdx = -1;
+  killSnapshots = [];
+  selectedSnapshot = null;
+  waveTimer = 0;
+  scheduleBunkerEvents();
+  // Distribute interceptors across launchers
+  for (let li = 0; li < launchers.length; li++) {
+    const L = launchers[li];
+    L.fireMode = 0;
+    L.arming = false;
+    L.armTimer = 0;
+    L.resupplying = false;
+    L.resupplyTimer = 0;
+    L.interceptorsLeft = Math.floor(totalInterceptors / launchers.length);
+  }
+  // Remainder goes to first launcher
+  launchers[0].interceptorsLeft += totalInterceptors % launchers.length;
+  activeLauncher = 0;
+}
+
+function launchInterceptor(li, armed, autoPilot) {
+  const L = launchers[li];
+  if (L.interceptorsLeft <= 0) return;
+  L.interceptorsLeft--;
+  const int = makeInterceptor(armed, autoPilot, L.x);
+  interceptors.push(int);
+  activeIdx = interceptors.length - 1;
+}
+
+function triggerResupply(li) {
+  const L = launchers[li];
+  if (L.resupplying || L.arming) return;
+  L.resupplying = true;
+  L.resupplyTimer = 0;
+}
+
+function fireFromLauncher(li) {
+  const L = launchers[li];
+  if (bunkerLocksFire()) return;
+  if (spaceCooldown > 0 || L.arming || L.resupplying) return;
+  activeLauncher = li;
+  if (L.fireMode === 1 || L.fireMode === 2) {
+    if (L.interceptorsLeft > 0) { L.arming = true; L.armTimer = 0; }
+  } else {
+    launchInterceptor(li, false, false);
+  }
+  spaceCooldown = 15;
+}
+
+function switchInterceptor() {
+  // Select the most recently launched alive interceptor
+  for (let i = interceptors.length - 1; i >= 0; i--) {
+    if (interceptors[i].alive) { activeIdx = i; return; }
+  }
+  activeIdx = -1;
+}
+
+function updateCombat() {
+  waveTimer++;
+  updateBunker();
+  if (state !== COMBAT) return;
+  updateCamels();
+  // Advance sweep radar
+  sweepAngle = (sweepAngle + SWEEP_RATE) % (Math.PI * 2);
+  // Arming timers — per launcher
+  for (let li = 0; li < launchers.length; li++) {
+    const L = launchers[li];
+    if (L.arming) {
+      L.armTimer++;
+      const requiredTime = L.fireMode === 2 ? AUTOPILOT_ARM_TIME : ARM_TIME;
+      if (L.armTimer >= requiredTime) {
+        L.arming = false;
+        L.armTimer = 0;
+        launchInterceptor(li, true, L.fireMode === 2);
+      }
+    }
+  }
+  // Resupply timers — per launcher
+  for (let li = 0; li < launchers.length; li++) {
+    const L = launchers[li];
+    if (L.resupplying) {
+      L.resupplyTimer++;
+      if (L.resupplyTimer >= RESUPPLY_TIME) {
+        L.resupplying = false;
+        L.resupplyTimer = 0;
+        L.interceptorsLeft += 3 + Math.floor(wave / 2);
+      }
+    }
+  }
+  // Move active launch pad with A/D (left hand). Arrows are reserved for
+  // interceptor steering so both control planes can run simultaneously without
+  // a modifier key. 3 px/frame at 60 fps = 180 px/s; same constant as the
+  // pre-rewrite Shift+Arrow path.
+  {
+    const L = launchers[activeLauncher];
+    const minX = launcherMinX(activeLauncher);
+    const maxX = launcherMaxX(activeLauncher);
+    if (keys['KeyA']) L.x = Math.max(minX, L.x - 3);
+    if (keys['KeyD']) L.x = Math.min(maxX, L.x + 3);
+  }
+  // Spawn shaheds
+  spawnTimer++;
+  const spawnInterval = Math.max(40, 120 - wave * 10);
+  if (shahedsToSpawn > 0 && spawnTimer >= spawnInterval) {
+    const isCruise = Math.random() < 0.2;
+    shaheds.push(makeShahed(wave, isCruise));
+    shahedsToSpawn--;
+    spawnTimer = 0;
+  }
+  // Update shaheds
+  for (const s of shaheds) {
+    if (!s.alive) continue;
+    updateShahed(s);
+    // Reached ground
+    if (s.y > canvas.height - 50) {
+      s.alive = false;
+      s.outcome = 'impact';
+      lives -= s.cruise ? 2 : 1;
+      explosions.push(makeExplosion(s.x, canvas.height - 50, 'orange'));
+    }
+  }
+  // Update interceptors
+  for (let i = 0; i < interceptors.length; i++) {
+    const int = interceptors[i];
+    if (!int.alive) continue;
+    int.age++;
+    // Autopilot: seek nearest threat within detection radius
+    if (int.autoPilot) {
+      let nearest = null;
+      let nearestDist = Infinity;
+      for (const s of shaheds) {
+        if (!s.alive) continue;
+        const d = Math.hypot(int.x - s.x, int.y - s.y);
+        if (d < AUTOPILOT_DETECT_RADIUS && d < nearestDist) {
+          nearest = s;
+          nearestDist = d;
+        }
+      }
+      if (nearest) {
+        // Steer toward threat
+        const dx = nearest.x - int.x;
+        const dy = nearest.y - int.y;
+        const angle = Math.atan2(dy, dx);
+        const speed = Math.hypot(int.vx, int.vy);
+        const turnRate = 0.08;
+        const currentAngle = Math.atan2(int.vy, int.vx);
+        let diff = angle - currentAngle;
+        // Normalize to [-PI, PI]
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        const newAngle = currentAngle + Math.sign(diff) * Math.min(Math.abs(diff), turnRate);
+        int.vx = Math.cos(newAngle) * speed;
+        int.vy = Math.sin(newAngle) * speed;
+      }
+    }
+    // Steering — arrows steer the active interceptor. Independent of A/D
+    // launcher movement (different physical keys), so the player can do both
+    // simultaneously without a modifier.
+    if (i === activeIdx) {
+      if (keys['ArrowLeft']) int.vx -= 0.25;
+      if (keys['ArrowRight']) int.vx += 0.25;
+      if (keys['ArrowUp']) int.vy -= 0.2;
+      if (keys['ArrowDown']) int.vy += 0.3;
+      // Touch steering — pull toward finger position in any direction
+      if (touchSteerActive) {
+        const dx = touchX - int.x;
+        const dy = touchY - int.y;
+        const dist = Math.hypot(dx, dy);
+        const deadzone = 15;
+        if (dist > deadzone) {
+          const force = Math.min(dist / 120, 1) * 0.35;
+          int.vx += (dx / dist) * force;
+          int.vy += (dy / dist) * force;
+        }
+      }
+    }
+    // Drag on both axes — preserves base thrust while allowing arcs
+    int.vx *= 0.96;
+    int.vy += (int.vy < 0 ? -0.02 : 0.02); // slight bias back to base speed
+    int.vy = Math.max(-6, Math.min(3, int.vy)); // cap speed range
+    int.x += int.vx;
+    int.y += int.vy;
+    // Trail
+    int.trail.push({ x: int.x, y: int.y + 10 });
+    if (int.trail.length > 20) int.trail.shift();
+    // Record trajectory
+    if (int.age % 3 === 0) int.path.push({ x: int.x, y: int.y });
+    // Off screen
+    if (int.y < -20 || int.y > canvas.height - 45 || int.x < -20 || int.x > canvas.width + 20) {
+      int.alive = false;
+      if (!int.outcome) int.outcome = 'miss';
+    }
+    // Collision with shaheds (armed = proximity blast, unarmed = direct contact)
+    if (int.armed) {
+      // Proximity — trigger when close, blast kills everything in wider radius
+      let triggered = false;
+      for (const s of shaheds) {
+        if (!s.alive) continue;
+        if (Math.hypot(int.x - s.x, int.y - s.y) < PROX_TRIGGER) { triggered = true; break; }
+      }
+      if (triggered) {
+        let kills = 0;
+        addBlastWave(int.x, int.y);
+        recordKillSnapshot(int.x, int.y, 0, i);
+        for (const s of shaheds) {
+          if (!s.alive) continue;
+          if (Math.hypot(int.x - s.x, int.y - s.y) < PROX_RADIUS) {
+            s.alive = false;
+            s.outcome = 'intercepted';
+            kills++;
+            score += s.cruise ? 250 : 100;
+            explosions.push(makeExplosion(s.x, s.y, 'green'));
+            // Bonus for in-radar kill
+            for (const r of radars) {
+              if (Math.hypot(s.x - r.x, s.y - r.y) < r.radius) { score += 50; break; }
+            }
+          }
+        }
+        // Patch kill count into snapshot
+        killSnapshots[killSnapshots.length - 1].kills = kills;
+        killSnapshots[killSnapshots.length - 1].score = score;
+        // Multi-kill bonus
+        if (kills > 1) score += kills * 75;
+        lastMultiKills = kills;
+        int.alive = false;
+        int.outcome = 'hit';
+        explosions.push(makeExplosion(int.x, int.y, 'green'));
+        killFlash = kills > 1 ? 90 : 60;
+        if (kills > 0) registerIntercepts(kills);
+        if (i === activeIdx) switchInterceptor();
+      }
+    } else {
+      // Unarmed — direct hit on single target
+      for (const s of shaheds) {
+        if (!s.alive) continue;
+        if (Math.hypot(int.x - s.x, int.y - s.y) < 22) {
+          recordKillSnapshot(s.x, s.y, 1, i);
+          s.alive = false;
+          s.outcome = 'intercepted';
+          int.alive = false;
+          int.outcome = 'hit';
+          score += s.cruise ? 250 : 100;
+          for (const r of radars) {
+            if (Math.hypot(s.x - r.x, s.y - r.y) < r.radius) { score += 50; break; }
+          }
+          explosions.push(makeExplosion(s.x, s.y, 'green'));
+          killFlash = 60;
+          registerIntercepts(1);
+          if (i === activeIdx) switchInterceptor();
+          break;
+        }
+      }
+    }
+  }
+  // Check wave end conditions
+  const aliveShaheds = shaheds.filter(s => s.alive).length;
+  if (lives <= 0) {
+    state = GAME_OVER;
+    showNameInput();
+    trajectories = {
+      shaheds: shaheds.map(s => ({ path: s.path, outcome: s.outcome || 'impact' })),
+      interceptors: interceptors.map(i => ({ path: i.path, outcome: i.outcome || 'miss' }))
+    };
+    return;
+  }
+  if (shahedsToSpawn === 0 && aliveShaheds === 0) {
+    state = WAVE_END;
+    score += wave * 50; // wave bonus
+    waveEndTimer = 0;
+    // Save trajectories for replay
+    trajectories = {
+      shaheds: shaheds.map(s => ({ path: s.path, outcome: s.outcome || 'intercepted' })),
+      interceptors: interceptors.map(i => ({ path: i.path, outcome: i.outcome || 'miss' }))
+    };
+  }
+}
+
+// --- CAMEL RENDER ---
+function drawCamel(c) {
+  const groundY = canvas.height - 50;
+  const y = groundY + Math.sin(c.bob) * 2;
+  const x = c.x;
+  const dir = c.vx >= 0 ? 1 : -1;
+  const stride = ((c.age >> 2) & 1);
+  ctx.save();
+  // Body
+  ctx.fillStyle = '#c9a26b';
+  ctx.fillRect(x - 12, y - 16, 24, 10);
+  // Humps
+  ctx.fillStyle = '#b38a5a';
+  ctx.fillRect(x - 8, y - 22, 6, 6);
+  ctx.fillRect(x + 2, y - 22, 6, 6);
+  // Neck + head
+  ctx.fillStyle = '#c9a26b';
+  ctx.fillRect(x + dir * 8, y - 28, 4, 16);
+  ctx.fillRect(x + dir * 8, y - 30, 10, 5);
+  // Eye
+  ctx.fillStyle = '#000';
+  ctx.fillRect(x + dir * 15, y - 28, 1, 1);
+  // Legs
+  ctx.fillStyle = '#8a6a3a';
+  if (stride) {
+    ctx.fillRect(x - 10, y - 6, 2, 8);
+    ctx.fillRect(x + 8, y - 6, 2, 8);
+    ctx.fillRect(x - 4, y - 5, 2, 7);
+    ctx.fillRect(x + 2, y - 5, 2, 7);
+  } else {
+    ctx.fillRect(x - 8, y - 6, 2, 8);
+    ctx.fillRect(x + 6, y - 6, 2, 8);
+    ctx.fillRect(x - 2, y - 5, 2, 7);
+    ctx.fillRect(x + 4, y - 5, 2, 7);
+  }
+  ctx.restore();
+}
+
+function drawCamelSpits() {
+  for (const p of camelSpits) {
+    if (!p.alive) continue;
+    ctx.save();
+    ctx.fillStyle = 'rgba(220, 255, 255, 0.9)';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(120, 200, 220, 0.9)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawCamelOverlay() {
+  if (!camelMode) return;
+  // Release button
+  const b = BTN_CAMEL;
+  ctx.save();
+  ctx.fillStyle = camelPool > 0 ? 'rgba(100, 70, 30, 0.85)' : 'rgba(50, 40, 30, 0.6)';
+  ctx.fillRect(b.x, b.y, b.w, b.h);
+  ctx.strokeStyle = '#e6c98a';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(b.x, b.y, b.w, b.h);
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 14px "Courier New", monospace';
+  ctx.fillStyle = '#ffe9a8';
+  ctx.fillText('\uD83D\uDC2A RELEASE (' + camelPool + ')', b.x + b.w / 2, b.y + b.h / 2 + 5);
+  ctx.font = '10px "Courier New", monospace';
+  ctx.fillStyle = '#c9a26b';
+  ctx.fillText(isTouchDevice ? 'tap' : 'press C', b.x + b.w / 2, b.y + b.h + 12);
+  // Banner
+  ctx.textAlign = 'center';
+  ctx.font = 'bold 18px "Courier New", monospace';
+  ctx.fillStyle = '#e6c98a';
+  ctx.fillText('CAMEL RELIEF \u2014 spit the shaheds back', canvas.width / 2, 40);
+  ctx.restore();
+}
+
+// --- BUNKER OVERLAY RENDER ---
+function drawPixelChar(x, y, running) {
+  ctx.save();
+  const p = 3;
+  ctx.fillStyle = '#ffd9b8';
+  ctx.fillRect(x - p, y - 14, p * 2, p);           // head
+  ctx.fillStyle = '#3a5';
+  ctx.fillRect(x - p - 1, y - 16, p * 2 + 2, 2);   // helmet
+  ctx.fillStyle = '#4a8';
+  ctx.fillRect(x - p, y - 11, p * 2, p * 2);       // torso
+  ctx.fillStyle = '#222';
+  const stride = running && ((bunkerRunTimer >> 2) & 1);
+  if (stride) {
+    ctx.fillRect(x - p - 1, y - 5, p, p + 1);
+    ctx.fillRect(x + 1, y - 6, p, p + 2);
+  } else {
+    ctx.fillRect(x - p, y - 5, p * 2, p);
+    ctx.fillRect(x - p, y - 2, p, p);
+    ctx.fillRect(x, y - 2, p, p);
+  }
+  ctx.restore();
+}
+
+function drawBunker(x, y) {
+  ctx.save();
+  ctx.fillStyle = '#555';
+  ctx.beginPath();
+  ctx.arc(x, y - 4, 26, Math.PI, 2 * Math.PI);
+  ctx.fill();
+  ctx.fillRect(x - 28, y - 8, 56, 8);
+  ctx.fillStyle = '#333';
+  ctx.fillRect(x - 28, y - 10, 56, 2);
+  ctx.fillStyle = '#111';
+  ctx.fillRect(x - 6, y - 20, 12, 16);
+  ctx.restore();
+}
+
+function drawTBM(x, y) {
+  ctx.save();
+  ctx.fillStyle = '#bbb';
+  ctx.fillRect(x - 4, y, 8, 22);
+  ctx.fillStyle = '#ddd';
+  ctx.beginPath();
+  ctx.moveTo(x - 4, y + 22);
+  ctx.lineTo(x + 4, y + 22);
+  ctx.lineTo(x, y + 30);
+  ctx.closePath();
+  ctx.fill();
+  ctx.fillStyle = '#ff6600';
+  ctx.fillRect(x - 3, y - 6, 6, 6);
+  ctx.fillStyle = '#ffee00';
+  ctx.fillRect(x - 2, y - 3, 4, 3);
+  ctx.restore();
+}
+
+function drawBunkerOverlay() {
+  if (bunkerPhase === 'idle') return;
+  const groundY = canvas.height - 45;
+
+  // TBM descent in last 3s of warning, or continued into post
+  if (bunkerPhase === 'active') {
+    const frameIn = BUNKER_WARNING_FRAMES - bunkerTimer;
+    if (frameIn >= BUNKER_WARNING_FRAMES - 180) {
+      const p = (frameIn - (BUNKER_WARNING_FRAMES - 180)) / 180;
+      const tbmY = -20 + p * (groundY - -20);
+      drawTBM(GAME_W / 2, tbmY);
+    }
+  }
+
+  // Character position
+  let charX = BUNKER_CHAR_START_X;
+  const charY = groundY - 6;
+  if (bunkerPhase === 'active') {
+    if (bunkerRunTimer > 0) {
+      const p = Math.min(1, bunkerRunTimer / BUNKER_RUN_FRAMES);
+      charX = BUNKER_CHAR_START_X + (BUNKER_X - BUNKER_CHAR_START_X) * p;
+      drawPixelChar(charX, charY, true);
+    } else {
+      drawPixelChar(charX, charY, false);
+    }
+  } else if (bunkerPhase === 'post') {
+    if (bunkerOutcome !== 'safe') {
+      // Frozen wherever they were
+      const p = Math.min(1, bunkerRunTimer / BUNKER_RUN_FRAMES);
+      charX = BUNKER_CHAR_START_X + (BUNKER_X - BUNKER_CHAR_START_X) * p;
+      drawPixelChar(charX, charY, false);
+    }
+  }
+
+  drawBunker(BUNKER_X, groundY);
+
+  // Impact / outcome visuals
+  if (bunkerPhase === 'post') {
+    const age = BUNKER_POST_FRAMES - bunkerPostTimer;
+    const alpha = Math.max(0, 1 - age / BUNKER_POST_FRAMES);
+    const impactX = bunkerOutcome === 'hit'
+      ? (BUNKER_CHAR_START_X + (BUNKER_X - BUNKER_CHAR_START_X) * Math.min(1, bunkerRunTimer / BUNKER_RUN_FRAMES))
+      : BUNKER_CHAR_START_X;
+    ctx.save();
+    // Screen white-out flash
+    ctx.fillStyle = `rgba(255, 240, 180, ${alpha * 0.35})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // Expanding ring
+    ctx.strokeStyle = `rgba(255, 180, 40, ${alpha})`;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(impactX, groundY, (age / BUNKER_POST_FRAMES) * 140, 0, Math.PI * 2);
+    ctx.stroke();
+    // Inner flash
+    ctx.fillStyle = `rgba(255, 80, 0, ${alpha * 0.7})`;
+    ctx.beginPath();
+    ctx.arc(impactX, groundY, (age / BUNKER_POST_FRAMES) * 50, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Warning banner + RUN button
+  if (bunkerPhase === 'active') {
+    const secsLeft = Math.max(0, Math.ceil(bunkerTimer / 60));
+    const flash = Math.floor(bunkerTimer / 10) % 2 === 0;
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 24px "Courier New", monospace';
+    ctx.fillStyle = flash ? '#ff3333' : '#ffaa00';
+    ctx.shadowColor = '#ff0000';
+    ctx.shadowBlur = 12;
+    ctx.fillText(`\u26A0 TBM INBOUND \u2014 RUN! ${secsLeft}s`, canvas.width / 2, 140);
+    ctx.shadowBlur = 0;
+    if (bunkerRunTimer === 0) {
+      const b = BTN_BUNKER_RUN;
+      ctx.fillStyle = flash ? '#cc0000' : '#880000';
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+      ctx.strokeStyle = '#ffff00';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(b.x, b.y, b.w, b.h);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 32px "Courier New", monospace';
+      ctx.fillText('RUN!', b.x + b.w / 2, b.y + b.h / 2 + 10);
+      ctx.font = '11px "Courier New", monospace';
+      ctx.fillStyle = '#ffcc00';
+      ctx.fillText(isTouchDevice ? '(tap)' : '(press B)', b.x + b.w / 2, b.y + b.h + 14);
+    } else {
+      ctx.font = 'bold 18px "Courier New", monospace';
+      ctx.fillStyle = '#ffcc00';
+      ctx.fillText('TAKING COVER...', canvas.width / 2, 170);
+    }
+    ctx.restore();
+  }
+
+  if (bunkerPhase === 'post') {
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.font = 'bold 28px "Courier New", monospace';
+    if (bunkerOutcome === 'safe') {
+      ctx.fillStyle = '#00ff88';
+      ctx.shadowColor = '#00ff88';
+      ctx.shadowBlur = 16;
+      ctx.fillText('SAFE IN BUNKER', canvas.width / 2, 160);
+    } else {
+      ctx.fillStyle = '#ff3333';
+      ctx.shadowColor = '#ff0000';
+      ctx.shadowBlur = 16;
+      ctx.fillText('CAUGHT IN THE OPEN', canvas.width / 2, 160);
+    }
+    ctx.shadowBlur = 0;
+    ctx.restore();
+  }
+}
+
+// --- RENDER ---
+function render() {
+  if (spaceCooldown > 0) spaceCooldown--;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // Background
+  ctx.fillStyle = '#060612';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  drawStars();
+
+  if (state === TITLE) {
+    drawGround();
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#00ff88';
+    ctx.font = 'bold 36px "Courier New", monospace';
+    ctx.fillText('AIR DEFENDERS', canvas.width / 2, 60);
+    ctx.font = '14px "Courier New", monospace';
+    ctx.fillStyle = '#008844';
+    ctx.fillText('Intercept incoming threats', canvas.width / 2, 86);
+
+    // Top-5 single-player leaderboard (server filtered to mode=sp).
+    drawLeaderboard(110, undefined);
+
+    // EDIT NAME button — small canvas button above the controls block. Tap
+    // pops the nameInput overlay so SP + MP share the same persistent name
+    // (key NAME_KEY in localStorage).
+    {
+      const curName = (localStorage.getItem(NAME_KEY) || '').toUpperCase().slice(0, 14);
+      const lbl = curName ? 'EDIT NAME (' + curName + ')' : 'EDIT NAME';
+      ctx.fillStyle = '#0a1a2a';
+      ctx.fillRect(BTN_EDIT_NAME.x, BTN_EDIT_NAME.y, BTN_EDIT_NAME.w, BTN_EDIT_NAME.h);
+      ctx.strokeStyle = '#44aaff';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(BTN_EDIT_NAME.x, BTN_EDIT_NAME.y, BTN_EDIT_NAME.w, BTN_EDIT_NAME.h);
+      ctx.fillStyle = '#88ccff';
+      ctx.font = 'bold 13px "Courier New", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(lbl, BTN_EDIT_NAME.x + BTN_EDIT_NAME.w / 2, BTN_EDIT_NAME.y + 22);
+      ctx.lineWidth = 1;
+    }
+    // Controls block - touch-aware. Touch mode uses the HTML strip below.
+    const cx = canvas.width / 2 - 180;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#00aa66';
+    ctx.font = '13px "Courier New", monospace';
+    if (isTouchDevice) {
+      ctx.fillText('TAP BAR       launch from station', cx, 470);
+      ctx.fillText('TOUCH+DRAG    steer active interceptor', cx, 488);
+      ctx.fillStyle = '#00cc66';
+      ctx.fillText('HOLD ARROWS   move active launcher', cx, 506);
+      ctx.fillStyle = '#00aaff';
+      ctx.fillText('Buttons below: MOVE / MODE / RESUPPLY / SWITCH / FIRE / ADVANCE', cx, 524);
+      ctx.fillStyle = '#00aa66';
+      ctx.fillText('2 stations unlock at wave 4 - SWITCH cycles', cx, 542);
+    } else {
+      ctx.fillText('SPACE         launch from active station', cx, 470);
+      ctx.fillText('\u2190\u2191\u2192\u2193         steer interceptor (full arc)', cx, 488);
+      ctx.fillText('A / D         move active launcher', cx, 506);
+      ctx.fillText('TAB / R / Q   fire mode / resupply / switch station', cx, 524);
+      ctx.fillText('Unarmed=direct  Armed=proximity (1s)  Autopilot=seek (2s)', cx, 542);
+    }
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#00ff88';
+    ctx.font = '16px "Courier New", monospace';
+    ctx.fillText('[ PRESS SPACE TO START ]', canvas.width / 2, 568);
+    if (cheatStartWave > 1) {
+      ctx.font = 'bold 13px "Courier New", monospace';
+      ctx.fillStyle = '#ffaa33';
+      ctx.fillText('PREVIEW MODE \u2014 starting at wave ' + cheatStartWave, canvas.width / 2, 565);
+    }
+    // Multiplayer link button \u2014 distinct visual style so it reads as "leave this page".
+    ctx.fillStyle = '#0a1a2a';
+    ctx.fillRect(BTN_MP_LINK.x, BTN_MP_LINK.y, BTN_MP_LINK.w, BTN_MP_LINK.h);
+    ctx.strokeStyle = '#44aaff';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(BTN_MP_LINK.x, BTN_MP_LINK.y, BTN_MP_LINK.w, BTN_MP_LINK.h);
+    ctx.fillStyle = '#44aaff';
+    ctx.font = 'bold 16px "Courier New", monospace';
+    ctx.fillText('CO-OP MULTIPLAYER \u2192', canvas.width / 2, BTN_MP_LINK.y + 28);
+    ctx.lineWidth = 1;
+    // Fabric demo trigger — rendered only for platform admins (ME.demo_admin).
+    drawDemoButton(BTN_DEMO);
+    ctx.textAlign = 'left';
+    return;
+  }
+
+  if (state === EMPLACEMENT) {
+    drawGround();
+    for (const r of radars) drawRadar(r);
+    // Instructions
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#00cc66';
+    ctx.font = 'bold 22px "Courier New", monospace';
+    ctx.fillText(`WAVE ${wave} — EMPLACEMENT PHASE`, canvas.width / 2, 40);
+    ctx.font = '14px "Courier New", monospace';
+    ctx.fillStyle = '#009944';
+    ctx.fillText(isTouchDevice ? 'Touch and drag radar stations to position them' : 'Drag radar stations to position them', canvas.width / 2, 70);
+    ctx.fillText(`${radars.length} radar${radars.length > 1 ? 's' : ''} available — radius ${radars[0].radius}m`, canvas.width / 2, 90);
+    if (wave === DUAL_LAUNCHER_WAVE && launchers.length === 2) {
+      ctx.fillStyle = '#44ccff';
+      ctx.font = 'bold 16px "Courier New", monospace';
+      ctx.fillText('SECOND LAUNCH STATION ONLINE', canvas.width / 2, 120);
+      ctx.font = '13px "Courier New", monospace';
+      ctx.fillStyle = '#00cccc';
+      if (isTouchDevice) {
+        ctx.fillText('L1 \u2194 L2 button (bottom center) switches active station', canvas.width / 2, 145);
+        ctx.fillText('Tap directly on a station on the ground bar to fire it', canvas.width / 2, 165);
+      } else {
+        ctx.fillText('Q switches active station', canvas.width / 2, 145);
+        ctx.fillText('A / D moves the active station along the ground', canvas.width / 2, 165);
+      }
+      ctx.font = '14px "Courier New", monospace';
+    }
+    if (wave === CAMEL_WAVE) {
+      ctx.fillStyle = '#e6c98a';
+      ctx.font = 'bold 16px "Courier New", monospace';
+      ctx.fillText('RELIEF WAVE \u2014 CAMEL CORPS DEPLOYED', canvas.width / 2, 200);
+      ctx.font = '13px "Courier New", monospace';
+      ctx.fillStyle = '#c9a26b';
+      ctx.fillText(isTouchDevice ? 'Tap RELEASE to send out a camel (auto-releases too)' : 'Press C to release a camel (auto-releases too)', canvas.width / 2, 222);
+      ctx.fillText('Camels roam and spit \u2014 shaheds retreat on a hit', canvas.width / 2, 240);
+      ctx.fillText('No threat this wave. Catch your breath.', canvas.width / 2, 258);
+    }
+    if (wave === BUNKER_RUN_WAVE) {
+      ctx.fillStyle = '#ff6644';
+      ctx.font = 'bold 16px "Courier New", monospace';
+      ctx.fillText('NEW THREAT: THEATER BALLISTIC MISSILE', canvas.width / 2, 200);
+      ctx.font = '13px "Courier New", monospace';
+      ctx.fillStyle = '#ffaa66';
+      ctx.fillText('When siren sounds: 10s warning, 5s to reach bunker', canvas.width / 2, 222);
+      ctx.fillText(isTouchDevice ? 'Tap RUN! before countdown drops below 5s' : 'Press B before countdown drops below 5s', canvas.width / 2, 240);
+      ctx.fillText('Miss the window \u2014 game over.', canvas.width / 2, 258);
+    }
+    ctx.fillStyle = '#00ff88';
+    ctx.font = '16px "Courier New", monospace';
+    ctx.fillText('[ PRESS SPACE WHEN READY ]', canvas.width / 2, canvas.height - 70);
+    ctx.textAlign = 'left';
+    // Draw draggable indicators
+    for (const r of radars) {
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, 14, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(0, 255, 120, 0.6)';
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 4]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    return;
+  }
+
+  // COMBAT, WAVE_END, GAME_OVER — all render the field
+  drawGround();
+  for (const r of radars) drawRadar(r);
+  drawSweepRadar();
+  // Draw shaheds
+  for (const s of shaheds) {
+    if (!s.alive) continue;
+    const alpha = Math.max(0.04, s.visible);
+    if (s.cruise) {
+      drawCruiseShape(s.x, s.y, s.angle, alpha);
+    } else {
+      drawShahedShape(s.x, s.y, s.angle, alpha);
+    }
+    // If barely visible, show a faint blip
+    if (s.visible < 0.2 && s.visible > 0.01) {
+      ctx.fillStyle = `rgba(255, 80, 40, ${0.15 + Math.sin(Date.now() * 0.01) * 0.05})`;
+      ctx.fillRect(s.x - 1, s.y - 1, 2, 2);
+    }
+  }
+  // Draw interceptors
+  for (let i = 0; i < interceptors.length; i++) {
+    if (!interceptors[i].alive) continue;
+    drawInterceptor(interceptors[i], i === activeIdx);
+  }
+  drawExplosions();
+  drawBlastWaves();
+  if (camelMode) {
+    for (const c of camels) drawCamel(c);
+    drawCamelSpits();
+  }
+  drawHUD();
+  drawTouchButtons();
+  if (state === COMBAT) {
+    drawBunkerOverlay();
+    drawCamelOverlay();
+  }
+
+  // Kill flash
+  if (killFlash > 0) {
+    const alpha = killFlash / 60;
+    // Screen flash
+    ctx.fillStyle = `rgba(0, 255, 120, ${alpha * 0.08})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // Text
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.font = `bold ${28 + (60 - killFlash) * 0.3}px "Courier New", monospace`;
+    ctx.fillStyle = `rgba(0, 255, 136, ${alpha})`;
+    ctx.shadowColor = '#00ff88';
+    ctx.shadowBlur = 20 * alpha;
+    ctx.fillText('IF IT FLIES, IT DIES!', canvas.width / 2, canvas.height / 2);
+    if (lastMultiKills > 1) {
+      ctx.font = 'bold 22px "Courier New", monospace';
+      ctx.fillStyle = 'rgba(255, 220, 60, ' + alpha + ')';
+      ctx.shadowColor = '#ffcc00';
+      ctx.fillText('MULTI-KILL x' + lastMultiKills + '!', canvas.width / 2, canvas.height / 2 + 35);
+    }
+    ctx.shadowBlur = 0;
+    ctx.restore();
+    killFlash--;
+  }
+
+  // Bonus-life flash
+  if (lifeUpFlash > 0) {
+    const alpha = Math.min(1, lifeUpFlash / 60);
+    ctx.save();
+    ctx.textAlign = 'center';
+    ctx.font = `bold ${32 + (120 - lifeUpFlash) * 0.15}px "Courier New", monospace`;
+    ctx.fillStyle = `rgba(255, 220, 60, ${alpha})`;
+    ctx.shadowColor = '#ffcc00';
+    ctx.shadowBlur = 24 * alpha;
+    ctx.fillText('+1 LIFE', canvas.width / 2, canvas.height / 2 - 60);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+    lifeUpFlash--;
+  }
+
+  if (state === COMBAT && !window._testMode) {
+    updateCombat();
+  }
+
+  if (state === WAVE_END) {
+    waveEndTimer++;
+    drawTrajectories();
+    if (selectedSnapshot !== null && killSnapshots[selectedSnapshot]) {
+      drawFreezeFrame(killSnapshots[selectedSnapshot]);
+    } else {
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#00ff88';
+      ctx.font = 'bold 28px "Courier New", monospace';
+      ctx.fillText(`WAVE ${wave} COMPLETE`, canvas.width / 2, canvas.height / 2 - 30);
+      ctx.font = '16px "Courier New", monospace';
+      ctx.fillText(`+${wave * 50} wave bonus`, canvas.width / 2, canvas.height / 2 + 10);
+      ctx.fillText(`Score: ${score}`, canvas.width / 2, canvas.height / 2 + 40);
+      if (killSnapshots.length > 0) {
+        ctx.fillStyle = '#00aa66';
+        ctx.font = '12px "Courier New", monospace';
+        ctx.fillText(isTouchDevice ? 'tap green markers to review kills' : 'click green markers to review kills', canvas.width / 2, canvas.height / 2 + 65);
+        ctx.fillStyle = '#00ff88';
+        ctx.font = '16px "Courier New", monospace';
+      }
+      if (waveEndTimer > 60) {
+        ctx.fillText('[ PRESS SPACE FOR NEXT WAVE ]', canvas.width / 2, canvas.height / 2 + 85);
+      }
+      ctx.textAlign = 'left';
+    }
+  }
+
+  if (state === CELEBRATION) {
+    // Advance timer; drop into GAME_OVER when done.
+    if (celebrationTimer > 0) celebrationTimer--;
+    if (celebrationTimer <= 0) { state = GAME_OVER; return; }
+    tickConfetti();
+    drawConfetti();
+    ctx.textAlign = 'center';
+    // Flash the banner at ~4 Hz (bright for 4 frames, dim for 4, etc.)
+    const flashOn = (Math.floor(celebrationTimer / 8) % 2) === 0;
+    ctx.fillStyle = flashOn ? '#ffee55' : '#ff4488';
+    ctx.font = 'bold 72px "Courier New", monospace';
+    ctx.fillText('TOP FIVE!', canvas.width / 2, canvas.height / 2 - 10);
+    ctx.fillStyle = flashOn ? '#00ff88' : '#00aaff';
+    ctx.font = 'bold 28px "Courier New", monospace';
+    ctx.fillText('#' + celebrationRank + '  \u2014  ' + score + ' pts', canvas.width / 2, canvas.height / 2 + 40);
+    ctx.textAlign = 'left';
+    return;
+  }
+
+  if (state === GAME_OVER) {
+    drawTrajectories();
+    if (selectedSnapshot !== null && killSnapshots[selectedSnapshot]) {
+      drawFreezeFrame(killSnapshots[selectedSnapshot]);
+    } else {
+      ctx.textAlign = 'center';
+      if (currentPhrase) {
+        ctx.fillStyle = '#ffcc00';
+        ctx.font = 'italic 14px "Courier New", monospace';
+        ctx.fillText(currentPhrase, canvas.width / 2, canvas.height / 2 - 70);
+      }
+      ctx.fillStyle = '#ff4444';
+      ctx.font = 'bold 36px "Courier New", monospace';
+      ctx.fillText('AREA COMPROMISED', canvas.width / 2, canvas.height / 2 - 40);
+      ctx.fillStyle = '#cc3333';
+      ctx.font = '18px "Courier New", monospace';
+      ctx.fillText(`Final Score: ${score}`, canvas.width / 2, canvas.height / 2 - 10);
+      ctx.fillText(`Waves Survived: ${wave - 1}`, canvas.width / 2, canvas.height / 2 + 15);
+      if (enteringName) {
+        ctx.fillStyle = '#00ff88';
+        ctx.font = '16px "Courier New", monospace';
+        ctx.fillText('ENTER YOUR NAME:', canvas.width / 2, canvas.height / 2 + 50);
+        // Input element is positioned over canvas by showNameInput()
+        ctx.fillStyle = '#005522';
+        ctx.font = '11px "Courier New", monospace';
+        ctx.fillText('press ENTER to confirm', canvas.width / 2, canvas.height / 2 + 85);
+      } else {
+        if (killSnapshots.length > 0) {
+          ctx.fillStyle = '#00aa66';
+          ctx.font = '12px "Courier New", monospace';
+          ctx.fillText(isTouchDevice ? 'tap green markers to review kills' : 'click green markers to review kills', canvas.width / 2, canvas.height / 2 + 38);
+        }
+        ctx.fillStyle = '#ff6666';
+        ctx.font = '16px "Courier New", monospace';
+        ctx.fillText('[ PRESS SPACE TO RETURN HOME ]', canvas.width / 2, canvas.height / 2 + 55);
+        ctx.textAlign = 'left';
+        // Leaderboard
+        drawLeaderboard(canvas.height / 2 + 85, score);
+      }
+      ctx.textAlign = 'left';
+    }
+  }
+}
+
+// --- MAIN LOOP ---
+function loop() {
+  render();
+  requestAnimationFrame(loop);
+}
+
+// ─── HTML touchControls wiring (mobile-only) ────────────────────────────
+// Hold-to-move arrow buttons proxy to the same `keys['KeyA']` / `keys['KeyD']`
+// flags the keyboard sets, so the existing per-frame launcher-move logic
+// (L1930-31: `if (keys['KeyA']) L.x -= 3`) runs unchanged. No throttling, no
+// fighting with rAF sync, exact same speed and feel as keyboard A/D. The
+// fire / mode / resupply / switch / advance buttons are click-only (no
+// hold semantics needed).
+const btnLeft   = document.getElementById('btnLeft');
+const btnRight  = document.getElementById('btnRight');
+const btnMode   = document.getElementById('btnMode');
+const btnSup    = document.getElementById('btnSup');
+const btnSwitch = document.getElementById('btnSwitch');
+const btnFire   = document.getElementById('btnFire');
+const btnAdv    = document.getElementById('btnAdv');
+
+// bindHoldButton — wire pointerdown/up/cancel/leave so the button "press"
+// state corresponds exactly to whether the user's finger is on it. Adds the
+// .held class for visual feedback. Pointer events cover both mouse + touch
+// (Mobile Safari 13+, Chrome, Firefox) — single code path.
+function bindHoldButton(btn, keyCode) {
+  const press = (e) => {
+    e.preventDefault();
+    keys[keyCode] = true;
+    btn.classList.add('held');
+    // Capture so move-outside-then-release still fires pointerup.
+    if (e.pointerId !== undefined && btn.setPointerCapture) {
+      try { btn.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    }
+  };
+  const release = () => {
+    keys[keyCode] = false;
+    btn.classList.remove('held');
+  };
+  btn.addEventListener('pointerdown', press);
+  btn.addEventListener('pointerup', release);
+  btn.addEventListener('pointercancel', release);
+  btn.addEventListener('pointerleave', release);
+  // Block context-menu long-press on mobile (otherwise iOS Safari shows a
+  // text-select callout the instant you hold).
+  btn.addEventListener('contextmenu', e => e.preventDefault());
+}
+bindHoldButton(btnLeft,  'KeyA');
+bindHoldButton(btnRight, 'KeyD');
+
+btnMode.addEventListener('click', () => {
+  if (typeof launchers === 'undefined' || state !== COMBAT) return;
+  const L = launchers[activeLauncher];
+  L.fireMode = (L.fireMode + 1) % 3;
+  if (L.fireMode === 0) { L.arming = false; L.armTimer = 0; }
+});
+btnSup.addEventListener('click', () => {
+  if (state !== COMBAT) return;
+  triggerResupply(activeLauncher);
+});
+btnSwitch.addEventListener('click', () => {
+  if (typeof launchers === 'undefined' || launchers.length < 2) return;
+  activeLauncher = (activeLauncher + 1) % launchers.length;
+});
+btnFire.addEventListener('click', () => {
+  if (state !== COMBAT) return;
+  fireFromLauncher(activeLauncher);
+});
+btnAdv.addEventListener('click', () => {
+  // ADVANCE mirrors SPACE for state advancement; restart on GAME_OVER goes
+  // back to TITLE matching the SPACE handler.
+  if (state === TITLE) { startEmplacement(); }
+  else if (state === EMPLACEMENT) { startCombat(); }
+  else if (state === WAVE_END && waveEndTimer > 60) { startEmplacement(); }
+  else if (state === GAME_OVER) { state = TITLE; refreshServerScores(leaderboardPeriod, true); }
+});
+
+function updateTouchControls() {
+  if (!isTouchDevice) return;
+  const inCombat = (state === COMBAT);
+  const inEmplace = (state === EMPLACEMENT);
+  btnMode.disabled = !inCombat;
+  btnSup.disabled  = !inCombat;
+  btnFire.disabled = !inCombat;
+  btnSwitch.hidden = (typeof launchers === 'undefined' || launchers.length < 2);
+  // Movement buttons usable in COMBAT + EMPLACEMENT (matches A/D keyboard).
+  btnLeft.disabled  = !(inCombat || inEmplace);
+  btnRight.disabled = !(inCombat || inEmplace);
+  // If a state change disables a button mid-hold, clear the held flag so the
+  // launcher doesn't keep coasting after a phase transition.
+  if (btnLeft.disabled  && keys['KeyA']) { keys['KeyA'] = false; btnLeft.classList.remove('held'); }
+  if (btnRight.disabled && keys['KeyD']) { keys['KeyD'] = false; btnRight.classList.remove('held'); }
+  // ADVANCE label tracks the SPACE-driven state machine.
+  if (state === TITLE)            btnAdv.textContent = 'START';
+  else if (state === EMPLACEMENT) btnAdv.textContent = 'READY';
+  else if (state === WAVE_END)    btnAdv.textContent = 'NEXT WAVE';
+  else if (state === GAME_OVER)   btnAdv.textContent = 'HOME';
+  else                            btnAdv.textContent = 'COMBAT';
+  btnAdv.disabled = inCombat;
+}
+function tickTouchControls() {
+  updateTouchControls();
+  requestAnimationFrame(tickTouchControls);
+}
+if (isTouchDevice) requestAnimationFrame(tickTouchControls);
+
+// Boot up server sync for the leaderboard.
+subscribeSSE();
+refreshServerScores(leaderboardPeriod, true);
+setInterval(() => refreshServerScores(leaderboardPeriod, false), 15000);
+// Retry queued offline submissions periodically.
+setInterval(flushPending, 30000);
+
+loop();
+</script>
+</body>
+</html>

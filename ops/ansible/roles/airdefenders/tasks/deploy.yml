@@ -1,0 +1,96 @@
+---
+# airdefenders role tasks — image-pin .env write + runtime ledger.
+#
+# Two responsibilities (the compose lifecycle stays with the playbook
+# ops/ansible/airdefenders.yml for now; this role does NOT bring the
+# stack up, the playbook does):
+#
+#   1. Write AIRDEFENDERS_IMAGE=<pin> to {{ airdefenders_dir }}/.env so
+#      compose's image: ${AIRDEFENDERS_IMAGE:-default} picks up the pin.
+#      Rollback flips the env var, not this template, so the .env stays
+#      authoritative.
+#
+#   2. Append the per-host NDJSON ledger per ADR 0859 (mirrors the
+#      shape used by panoscope / portal / oauth2-proxy-dashboard /
+#      goat-zenoh).
+
+- name: airdefenders | ensure compose dir exists
+  ansible.builtin.file:
+    path: "{{ airdefenders_dir }}"
+    state: directory
+    mode: "0755"
+  become: true
+
+- name: airdefenders | write AIRDEFENDERS_IMAGE pin to compose .env
+  # lineinfile rather than template so a manual rollback.sh edit on the
+  # host is preserved across role re-runs (regexp matches the key,
+  # not the whole file). On first run the file is created.
+  ansible.builtin.lineinfile:
+    path: "{{ airdefenders_dir }}/.env"
+    create: true
+    mode: "0644"
+    regexp: "^AIRDEFENDERS_IMAGE="
+    line: "AIRDEFENDERS_IMAGE={{ airdefenders_image }}"
+  become: true
+
+# ----- rest-pub-bridge sidecar (only when the Zenoh publisher is on) ----
+# Pin the sidecar image only when an operator has set
+# `airdefenders_zenoh_sidecar_image` in group_vars (e.g. a digest at
+# live-fire). Until then the compose template's
+# `${AIRDEFENDERS_ZENOH_SIDECAR_IMAGE:-ghcr.io/{{ ghcr_org }}/rest-pub-bridge:latest}`
+# default applies. Writing it to .env lets `rollback.sh` flip it (ADR 0859).
+# Not a role-defaults `*_image` pin — see defaults/main.yml for why.
+- name: airdefenders | write AIRDEFENDERS_ZENOH_SIDECAR_IMAGE pin to compose .env
+  ansible.builtin.lineinfile:
+    path: "{{ airdefenders_dir }}/.env"
+    create: true
+    mode: "0644"
+    regexp: "^AIRDEFENDERS_ZENOH_SIDECAR_IMAGE="
+    line: "AIRDEFENDERS_ZENOH_SIDECAR_IMAGE={{ airdefenders_zenoh_sidecar_image }}"
+  become: true
+  when:
+    - airdefenders_zenoh_enabled | bool
+    - airdefenders_zenoh_sidecar_image is defined
+
+# Pre-flight the vendor leaf + CA root the sidecar mTLS session needs.
+# Fail closed with an actionable message rather than letting the sidecar
+# crash-loop on a missing cert — mirrors the zenoh-synth-vendors role.
+- name: airdefenders | pre-flight sidecar vendor leaf + key + CA root exist
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ airdefenders_zenoh_sidecar_cert_dir }}/{{ airdefenders_zenoh_vendor }}-cert.pem"
+    - "{{ airdefenders_zenoh_sidecar_cert_dir }}/{{ airdefenders_zenoh_vendor }}-key.pem"
+    - "{{ airdefenders_zenoh_sidecar_ca_root_src }}"
+  register: airdefenders_sidecar_cert_stats
+  become: true
+  when: airdefenders_zenoh_enabled | bool
+
+- name: airdefenders | fail on missing sidecar cert material
+  ansible.builtin.fail:
+    msg: >-
+      airdefenders rest-pub-bridge sidecar: required mTLS file missing at
+      {{ item.item }}. Mint the vendor leaf via
+      ops/zenoh-trial-peers/bootstrap-airdefenders-portal.sh (it SCPs the
+      cert to {{ airdefenders_zenoh_sidecar_cert_dir }} on this host), and
+      ensure the goat-zenoh router is deployed (it owns the CA root at
+      {{ airdefenders_zenoh_sidecar_ca_root_src }}). Then re-run.
+  loop: "{{ airdefenders_sidecar_cert_stats.results | default([]) }}"
+  when:
+    - airdefenders_zenoh_enabled | bool
+    - item is not skipped
+    - not (item.stat.exists | default(false))
+  loop_control:
+    label: "{{ item.item | default('?') }}"
+
+# Chainguard nonroot uid 65532 must be able to read the bind-mounted certs.
+- name: airdefenders | normalize sidecar cert dir ownership for uid 65532
+  ansible.builtin.file:
+    path: "{{ airdefenders_zenoh_sidecar_cert_dir }}"
+    owner: "65532"
+    group: "65532"
+    recurse: true
+  become: true
+  when: airdefenders_zenoh_enabled | bool
+# Deploy ledger now written by the shared `rollback-ledger`
+# meta-dependency (meta/main.yml) per ADR 1060 — no per-role task here.

@@ -1,0 +1,265 @@
+---
+# airdefenders.yml — Deploy the Air Defenders game + shared leaderboard.
+#
+# Parameterized for multi-site deploy. Defaults preserve the docker-provider
+# behavior; a site overrides via group_vars.
+#
+# Image posture (ADR 0859 easy-rollback tier-0 adopt):
+# the image now ships from GHCR (ghcr.io/{{ ghcr_org }}/airdefenders), built
+# by .github/workflows/airdefenders-image.yml on every merge to main
+# that touches ops/serve/airdefenders/. The previous "copy Go sources
+# to host + docker compose up -d --build" pattern was replaced with
+# pull + up. Image pin lives in ops/ansible/roles/airdefenders/
+# (defaults/main.yml: airdefenders_image); compose substitutes it via
+# the sibling .env file written by the role. Rollback:
+# ops/scripts/rollback.sh airdefenders [N].
+#
+# Two Traefik integration modes:
+#
+#   docker (default): container declares Traefik labels;
+#     Traefik's docker provider auto-discovers the router. mesh-only middleware
+#     gates mesh-internal access.
+#
+#   file: Ansible writes a sibling dynamic config file
+#     to /etc/traefik/dynamic/airdefenders.yml on the host. Traefik
+#     file provider picks it up via inotify. The container carries no
+# Traefik labels. Plays nicely with a master SAN list
+# (separate cert minted per service, no overlap).
+#
+# Usage:
+#   ansible-playbook airdefenders.yml
+#
+# Usage (additional sites — example shape):
+#   ansible-playbook airdefenders.yml -i inventory/<site>.ini \
+#     -e airdefenders_host_group=<site>_hosts \
+#     -e cloudflare_api_token="$CLOUDFLARE_API_TOKEN_<SITE>"
+# The per-site group_vars block sets airdefenders_url_host,
+# airdefenders_traefik_provider, airdefenders_traefik_network,
+# airdefenders_publish_cloudflare_dns + airdefenders_cloudflare_zone +
+# airdefenders_cloudflare_a_record_ips for the file-provider path.
+
+- name: Deploy airdefenders service
+  hosts: "{{ airdefenders_host_group | mandatory }}"
+  become: true
+
+  # NOTE on var precedence: per Ansible's documented variable
+  # precedence, play-level `vars:` BEAT group_vars/<group>. Defaults
+  # that need to be group_var-overridable per site live in the
+  # `airdefenders` role's defaults/main.yml (lowest precedence —
+  # every group_var beats them). Only structural / cross-site
+  # constants stay here at the play level.
+
+  vars:
+    airdefenders_dir: /opt/goat/airdefenders
+    airdefenders_data_dir: "{{ airdefenders_dir }}/data"
+    # User that owns the on-host directories.
+    airdefenders_user: "{{ nethost_user | default(ansible_user) }}"
+    # File-provider params; structural — same on every site.
+    airdefenders_traefik_dynamic_dir: /etc/traefik/dynamic
+    airdefenders_traefik_dynamic_filename: airdefenders.yml
+    # Pre-rename filename, removed on deploy: Traefik's file provider reads the
+    # whole directory, so an orphan declares a second router on the same Host().
+    airdefenders_traefik_dynamic_filename_legacy: jb-airdefenders.yml # oss-allow: a filename left on old hosts
+    airdefenders_traefik_cert_resolver: le
+    # Container port. Matches PORT env var in compose.
+    airdefenders_container_port: 8095
+    # Cloudflare zone + A record IPs are site-specific but only consulted
+    # when airdefenders_publish_cloudflare_dns is true; safe to default-empty
+    # at play level.
+    airdefenders_cloudflare_zone: ""
+    airdefenders_cloudflare_a_record_ips: []
+
+  tasks:
+    - name: Create directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ airdefenders_user }}"
+        group: "{{ airdefenders_user }}"
+        mode: "0755"
+      loop:
+        - "{{ airdefenders_dir }}"
+        - "{{ airdefenders_data_dir }}"
+
+    # Image-pin .env + runtime ledger — both delegated to the
+    # airdefenders role (ADR 0859 easy-rollback substrate). The role
+    # writes AIRDEFENDERS_IMAGE=<pin> to {{ airdefenders_dir }}/.env
+    # which compose-time substitutes into the docker-compose.yml
+    # template's `image: ${AIRDEFENDERS_IMAGE:-...}` line.
+    - name: Include airdefenders role (image pin + easy-rollback ledger)
+      # import_role (static), not include_role: this is airdefenders' only
+      # deploy path, and meta-dependencies (the shared rollback-ledger role,
+      # ADR 1060) fire for import_role but NOT for dynamic include_role.
+      # Safe to staticize here — unconditional, no per-invocation vars.
+      ansible.builtin.import_role:
+        name: airdefenders
+
+    - name: Detect Traefik Docker network (docker provider)
+      ansible.builtin.command:
+        cmd: >-
+          docker inspect netbird-traefik
+          --format {% raw %}'{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}'{% endraw %}
+      register: traefik_net_result
+      changed_when: false
+      failed_when: false
+      when: airdefenders_traefik_network | length == 0
+        and airdefenders_traefik_provider == 'docker'
+
+    - name: Set Traefik network fact (docker provider)
+      ansible.builtin.set_fact:
+        airdefenders_traefik_network_resolved: >-
+          {{ traefik_net_result.stdout.split()[0]
+             | default('netbird_netbird', true) }}
+      when: airdefenders_traefik_network | length == 0
+        and airdefenders_traefik_provider == 'docker'
+
+    - name: Set Traefik network fact (explicit override)
+      ansible.builtin.set_fact:
+        airdefenders_traefik_network_resolved: "{{ airdefenders_traefik_network }}"
+      when: airdefenders_traefik_network | length > 0
+
+    # ----- Zenoh-publisher pre-flight (skipped unless enabled) -----------
+    # The REST publish path needs no cert material — the only pre-flight
+    # we still want is "the operator told us where the router is".
+    - name: airdefenders | Zenoh pre-flight — REST endpoint configured
+      ansible.builtin.fail:
+        msg: >-
+          airdefenders Zenoh publisher enabled but
+          airdefenders_zenoh_rest_endpoint is empty. Set it in the
+          site's group_vars (nova_hosts default is
+          http://goat-zenoh-router:8000).
+      when:
+        - airdefenders_zenoh_enabled | bool
+        - airdefenders_zenoh_rest_endpoint | length == 0
+
+    - name: Write docker-compose.yml
+      ansible.builtin.template:
+        src: templates/airdefenders-docker-compose.yml.j2
+        dest: "{{ airdefenders_dir }}/docker-compose.yml"
+        owner: "{{ airdefenders_user }}"
+        mode: "0644"
+      notify: Restart airdefenders
+
+    - name: Write Traefik dynamic config (file provider)
+      ansible.builtin.template:
+        src: templates/airdefenders-traefik-dynamic.yml.j2
+        dest: "{{ airdefenders_traefik_dynamic_dir }}/{{ airdefenders_traefik_dynamic_filename }}"
+        owner: root
+        group: root
+        mode: "0644"
+      when: airdefenders_traefik_provider == 'file'
+
+    - name: Remove the pre-rename airdefenders route file
+      ansible.builtin.file:
+        path: "{{ airdefenders_traefik_dynamic_dir }}/{{ airdefenders_traefik_dynamic_filename_legacy }}"
+        state: absent
+      when:
+        - airdefenders_traefik_provider == 'file'
+        - airdefenders_traefik_dynamic_filename_legacy != airdefenders_traefik_dynamic_filename
+
+    - name: Pull airdefenders image
+      ansible.builtin.command:
+        cmd: "docker compose pull"
+        chdir: "{{ airdefenders_dir }}"
+      register: airdefenders_pull
+      changed_when: "'Downloaded newer image' in airdefenders_pull.stdout or 'Pull complete' in airdefenders_pull.stdout"
+
+    - name: Start airdefenders
+      ansible.builtin.command:
+        cmd: "docker compose up -d --remove-orphans"
+        chdir: "{{ airdefenders_dir }}"
+      register: compose_result
+      changed_when: "'Started' in compose_result.stderr or 'Creating' in compose_result.stderr or 'Recreated' in compose_result.stderr"
+
+    - name: Wait for airdefenders API to respond
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ airdefenders_container_port }}/health"
+        return_content: true
+      register: health_check
+      retries: 12
+      delay: 5
+      until: health_check.status == 200
+
+    # ----- Cloudflare A records (file-provider sites only) -----
+    # A site with mesh-CoreDNS needs no public record; a site with no mesh DNS
+    # needs public A records pointing at the relay public IPs (rathole forwards
+    # :443 back to Traefik).
+    - name: Look up Cloudflare zone id
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/zones?name={{ airdefenders_cloudflare_zone }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+        return_content: true
+      register: cf_zone_lookup
+      when: airdefenders_publish_cloudflare_dns | bool
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Set Cloudflare zone id fact
+      ansible.builtin.set_fact:
+        airdefenders_cf_zone_id: "{{ cf_zone_lookup.json.result[0].id }}"
+      when: airdefenders_publish_cloudflare_dns | bool
+      run_once: true
+
+    - name: List existing A records for the service hostname
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/zones/{{ airdefenders_cf_zone_id }}/dns_records?type=A&name={{ airdefenders_url_host }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+        return_content: true
+      register: cf_existing
+      when: airdefenders_publish_cloudflare_dns | bool
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Set existing A-record content set
+      ansible.builtin.set_fact:
+        airdefenders_cf_existing_ips: "{{ cf_existing.json.result | map(attribute='content') | list }}"
+      when: airdefenders_publish_cloudflare_dns | bool
+      run_once: true
+
+    - name: Create missing Cloudflare A records
+      ansible.builtin.uri:
+        url: "https://api.cloudflare.com/client/v4/zones/{{ airdefenders_cf_zone_id }}/dns_records"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ cloudflare_api_token }}"
+          Content-Type: application/json
+        body_format: json
+        body:
+          type: A
+          name: "{{ airdefenders_url_host }}"
+          content: "{{ item }}"
+          ttl: 60
+          proxied: false
+        status_code: [200, 201]
+      loop: "{{ airdefenders_cloudflare_a_record_ips }}"
+      when: airdefenders_publish_cloudflare_dns | bool
+        and item not in (airdefenders_cf_existing_ips | default([]))
+      delegate_to: localhost
+      become: false
+      run_once: true
+
+    - name: Print deployment status
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+            AIRDEFENDERS DEPLOYED
+          ========================================
+          Game:    https://{{ airdefenders_url_host }}/
+          API:     https://{{ airdefenders_url_host }}/api/scores
+          Health:  {{ health_check.json | to_nice_json }}
+          Metrics: https://{{ airdefenders_url_host }}/metrics
+          DB:      {{ airdefenders_data_dir }}/scores.db
+          Traefik: {{ airdefenders_traefik_provider }} provider on '{{ airdefenders_traefik_network_resolved | default('n/a') }}' network
+          ========================================
+
+  handlers:
+    - name: Restart airdefenders
+      ansible.builtin.command:
+        cmd: "docker compose up -d --force-recreate"
+        chdir: "{{ airdefenders_dir }}"

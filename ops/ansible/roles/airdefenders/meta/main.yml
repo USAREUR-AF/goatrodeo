@@ -1,0 +1,20 @@
+---
+galaxy_info:
+  role_name: airdefenders
+  author: goat-maintainer
+  license: Apache-2.0
+  min_ansible_version: "2.14"
+  platforms:
+    - name: Ubuntu
+      versions:
+        - jammy
+        - noble
+
+# Universal deploy-rollback ledger (ADR 1060).
+dependencies:
+  - role: rollback-ledger
+    when: airdefenders_enabled | default(true) | bool
+    vars:
+      rollback_component: airdefenders
+      rollback_artifact_type: image
+      rollback_ref: "{{ airdefenders_image }}"

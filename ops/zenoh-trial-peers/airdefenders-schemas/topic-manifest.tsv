@@ -1,0 +1,25 @@
+# Live airdefenders multiplayer topic → .proto file → message name manifest.
+# Consumed by build-fds.sh + upload-all.sh + the bootstrap-airdefenders-portal.sh
+# final stage. Tab-separated. Columns:
+#   topic_key_pattern	proto_file	message_name	wire_format
+#
+# wire_format is `json` for every row in this iteration — the airdefenders
+# Go publisher emits JSON on the wire (envelope.payload is a JSON object)
+# even though the schema body the portal stores is protobuf-fds AND the
+# topic.format is PATCH'd to `protobuf:<MsgName>`. The portal's
+# data-dictionary viewer renders the .fds; the inspector's "decode samples"
+# path will protobuf-decode the JSON bytes and fail per-sample. Same gap
+# the synth-vendor schemas live with — see CLAUDE.md §"Notional collapse"
+# wire-format-gap call-out. Flipping the wire format is a future task.
+#
+# SITE_ID is substituted at portal-registration time by
+# bootstrap-airdefenders-portal.sh; the key_pattern column here uses the
+# literal `<SITE>` placeholder that the bootstrap script replaces with
+# ${SITE_ID:-nova} when it looks up topic ids. build-fds.sh and
+# upload-all.sh don't care about the key_pattern column directly; they
+# match topic-id by proto_file → portal lookup.
+#
+airdefenders/<SITE>/radar/detection/v1	proto-airdefenders/radar_detection.proto	airdefenders.v1.RadarDetection	json
+airdefenders/<SITE>/missile/fired/v1	proto-airdefenders/missile_fired.proto	airdefenders.v1.MissileFired	json
+airdefenders/<SITE>/missile/intercept/v1	proto-airdefenders/missile_intercept.proto	airdefenders.v1.MissileIntercept	json
+airdefenders/<SITE>/shahed/impact/v1	proto-airdefenders/shahed_impact.proto	airdefenders.v1.ShahedImpact	json

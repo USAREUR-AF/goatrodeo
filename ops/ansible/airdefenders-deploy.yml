@@ -1,0 +1,50 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+#
+# Operator-fired playbook to bring up the airdefenders game server with the
+# Zenoh publisher enabled on a trial fabric. Thin wrapper that imports the existing
+# ops/ansible/airdefenders.yml playbook and lets <site>_hosts group_vars +
+# group_vars/<site>_hosts/airdefenders.yml flip
+# `airdefenders_zenoh_enabled: true`.
+#
+# Usage:
+#   cd ops/ansible
+#   OBJC_DISABLE_INITIALIZE_FORK_SAFETY=YES aws-vault exec <profile> --no-session -- \
+#     ansible-playbook \
+#       -i inventory/hosts.ini \
+#       -i inventory/mgmt-hosts-mesh.ini \
+#       -e airdefenders_host_group=<site>_hosts \
+#       airdefenders-deploy.yml
+#
+# Pre-flight (operator-side, one-time):
+#   1. zenoh-deploy.yml ran; the host Zenoh router healthy.
+#   2. Run ops/zenoh-trial-peers/bootstrap-airdefenders-portal.sh — this
+#      mints the `airdefenders` vendor in the portal, downloads the cert
+#      tarball, AND registers the four event topics. Unpack the tarball
+#      onto the host at /opt/airdefenders/certs/ (chown 65532:65532).
+#   3. (Optional) Verify /etc/goat-zenoh/tls/ca-root-cert.pem exists
+#      — same CA the audit-subscriber + synth-vendor units use.
+#
+# After this lands, the four topics
+#   airdefenders/nova/{radar/detection, missile/fired, missile/intercept,
+#                    shahed/impact}/v1
+# stream from the game server whenever a wave is in progress and at least
+# one browser is connected.
+#
+# Cross-refs:
+# - docs/design/airdefenders-multiplayer.md (§Zenoh mapping + §Envelope)
+# - docs/design/airdefenders-leaderboard.md (§"Block 11 Step 9" envelope
+#   alignment)
+# - docs/design/zenoh-trial-fabric.md
+# - ADR 0844 (Zenoh deployment topology + ACL v1)
+
+- name: nova-airdefenders | import shared playbook with nova_hosts overrides
+  ansible.builtin.import_playbook: airdefenders.yml
+  vars:
+    # Parameterized off `target` so a sibling goatnet deploys with
+    # `-e target=<site>_hosts`.
+    airdefenders_host_group: "{{ target | mandatory }}"
+    # The compose/Traefik mode + URL host come from group_vars/<site>_hosts/
+    # vars.yml + the per-service airdefenders.yml in the same dir; we
+    # only force the host_group here so the same shared playbook can be
+    # invoked against multiple sites by changing this one var.

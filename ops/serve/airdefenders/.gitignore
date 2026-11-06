@@ -1,0 +1,11 @@
+# Local-development artifacts produced by `go build` / `airdefenders.exe`.
+# CI builds via the Dockerfile in this directory, so the binary + the SQLite
+# DB files are never produced under version control on any reproducible
+# build path.
+airdefenders
+airdefenders.exe
+local-scores.db
+local-scores.db-shm
+local-scores.db-wal
+airdefenders.stdout.log
+airdefenders.stderr.log

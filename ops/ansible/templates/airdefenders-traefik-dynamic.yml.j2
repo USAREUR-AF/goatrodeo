@@ -1,0 +1,53 @@
+# Traefik dynamic config — airdefenders router for a file-provider site.
+#
+# Rendered by ops/ansible/airdefenders.yml at
+# {{ airdefenders_traefik_dynamic_dir }}/{{ airdefenders_traefik_dynamic_filename }}.
+# DO NOT EDIT ON THE HOST — the playbook regenerates on every run.
+#
+# Filename intentionally distinct from `mgmt.yml` (the mgmt-stack
+# router) so a later airdefenders-redeploy cannot stomp the mgmt routes,
+# and vice-versa. Traefik file provider unions all *.yml in
+# {{ airdefenders_traefik_dynamic_dir }}.
+#
+# tls.certResolver: {{ airdefenders_traefik_cert_resolver }} mints a SEPARATE
+# Let's Encrypt cert for {{ airdefenders_url_host }} (no SAN overlap with the
+# mgmt master SAN list — see mgmt.yml header for the "concurrent ACME
+# orders" warning that motivates the no-overlap rule).
+#
+# Upstream URL points at the airdefenders container by Docker network alias.
+# Both Traefik and airdefenders must be on the same Docker network
+# ({{ airdefenders_traefik_network_resolved | default('mgmt') }}) for the
+# alias to resolve.
+
+http:
+  routers:
+    airdefenders:
+      rule: "Host(`{{ airdefenders_url_host }}`)"
+      entryPoints:
+        - websecure
+      service: airdefenders
+{% if airdefenders_traefik_mesh_only_middleware | default('') | length > 0 %}
+      middlewares:
+        # Mesh-only gating — opt-in (defaults to off). Set
+        # airdefenders_traefik_mesh_only_middleware in site group_vars
+        # to attach, e.g. "mesh-only-allowlist@file"
+        # (defined in mgmt-dynamic.yml.j2).
+        - "{{ airdefenders_traefik_mesh_only_middleware }}"
+{% endif %}
+      tls:
+        certResolver: {{ airdefenders_traefik_cert_resolver }}
+
+  services:
+    airdefenders:
+      loadBalancer:
+        servers:
+{% if airdefenders_oauth2_proxy_enabled | default(false) | bool %}
+          # Authenticated door (ADR 1073). Every request reaches airdefenders through
+          # the oauth2-proxy sidecar, so the person is known and Hydra records
+          # one consent grant per visitor — which is what makes this surface
+          # visible to microscope. The mesh-only middleware above stays as
+          # defence in depth.
+          - url: "http://oauth2-proxy-airdefenders:4180"
+{% else %}
+          - url: "http://airdefenders:{{ airdefenders_container_port }}"
+{% endif %}

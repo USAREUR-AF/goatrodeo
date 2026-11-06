@@ -1,0 +1,24 @@
+// airdefenders common v1 — small shared types reused across every
+// per-event proto in this directory.
+//
+// Producer: ops/serve/airdefenders/{game.go, multiplayer.go} via
+//   ops/serve/airdefenders/zenoh.go publishing the four event topics.
+// Wire format on the fabric: JSON (matches field-name + ordering here).
+// The .fds descriptor is uploaded to the portal so the inspector + the
+// schema viewer + the autogen-code surfaces light up; it does NOT
+// change the wire format. Same posture as the synth-vendor schemas —
+// see CLAUDE.md §"Notional collapse" wire-format-gap call-out.
+
+syntax = "proto3";
+
+package airdefenders.v1;
+
+// 2-D position or velocity in canvas pixels (the airdefenders world is
+// a 2-D play area; the canonical world constants live in
+// ops/serve/airdefenders/index.html L29-30 and the server mirrors them
+// in ops/serve/airdefenders/game.go). Float32 matches the wire JSON's
+// number precision; no need for double.
+message Vec2 {
+  float x = 1;
+  float y = 2;
+}

@@ -1,0 +1,135 @@
+# Air Defenders — Docker Compose (Ansible-managed)
+# Managed by ops/ansible/airdefenders.yml — do not edit on host.
+#
+# Two Traefik integration modes per `airdefenders_traefik_provider`:
+#
+#   docker  — container declares Traefik labels; Traefik docker-provider
+#             auto-discovers the router.
+#   file    — container carries no Traefik labels; the routing lives in
+#             /etc/traefik/dynamic/airdefenders.yml rendered by the
+#             same Ansible play.
+#
+# Zenoh publisher: when `airdefenders_zenoh_enabled` is true, the env
+# block injects `ZENOH_PUBLISH=1` + `ZENOH_REST_ENDPOINT` + `SITE_ID`. The
+# Go server PUTs each game event to `ZENOH_REST_ENDPOINT`, which points at
+# the `airdefenders-zenoh-sidecar` (rest-pub-bridge) service below — NOT
+# the router directly. The sidecar re-publishes each sample over a native
+# mTLS session presenting the `airdefenders` vendor leaf, so the router's
+# access_control matches `CN=airdefenders-trial-peer` and admits the write
+# to `airdefenders/**` (docs/design/zenoh-rest-pub-bridge.md, ADR 1023).
+# This replaces the prior identity-less direct-to-REST-plugin path, which
+# the ADR 1020 ingress/egress ACL split denies. Both the game and the
+# sidecar join the Zenoh router's docker network
+# (`airdefenders_zenoh_network`) so container-name resolution works.
+#
+# Image: compose-time substitution reads AIRDEFENDERS_IMAGE from the
+# sibling .env file (written by the airdefenders role). Per ADR 0859,
+# `ops/scripts/rollback.sh airdefenders [N]` flips that env var to roll
+# back to a prior known-good image SHA without editing this template.
+
+services:
+  airdefenders:
+    image: ${AIRDEFENDERS_IMAGE:-ghcr.io/{{ ghcr_org }}/airdefenders:latest}
+    container_name: airdefenders
+    restart: unless-stopped
+    # Host-loopback port for ansible/smoketest health probes.
+    # External traffic flows in via Traefik (no public binding).
+    ports:
+      - "127.0.0.1:{{ airdefenders_container_port }}:{{ airdefenders_container_port }}"
+    environment:
+      PORT: "{{ airdefenders_container_port }}"
+      DB_PATH: "/data/scores.db"
+{% if airdefenders_zenoh_enabled | bool %}
+      # ---- Zenoh REST publisher wiring ------------------------------
+      ZENOH_PUBLISH: "1"
+      SITE_ID: "{{ airdefenders_site_id }}"
+      ZENOH_REST_ENDPOINT: "{{ airdefenders_zenoh_rest_endpoint }}"
+      # HOSTNAME is surfaced into the envelope's source.instance field.
+      HOSTNAME: "{{ inventory_hostname }}"
+{% endif %}
+{% if airdefenders_oauth2_proxy_enabled | default(false) | bool %}
+      # ---- Fabric-demo gate (demo_auth.go) ---------------------------
+      # Behind the authenticated door every request carries the proxy's
+      # validated X-Forwarded-* identity, so the game may read it. Only
+      # then: with no door the same headers are client-supplied and the
+      # game ignores them, which leaves /demo closed (fail-closed).
+      TRUST_FORWARDED_IDENTITY: "1"
+      DEMO_ADMIN_GROUPS: "{{ airdefenders_demo_admin_groups }}"
+{% endif %}
+    volumes:
+      # Named volume (Docker handles ownership for the container's nonroot UID).
+      # Bind-mounts would require chown to UID 65532 on the host.
+      - airdefenders-data:/data
+{% if airdefenders_traefik_provider == 'docker' %}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network={{ airdefenders_traefik_network_resolved | default('netbird_netbird') }}"
+      - "traefik.http.routers.airdefenders.rule=Host(`{{ airdefenders_url_host }}`)"
+      - "traefik.http.routers.airdefenders.entrypoints=websecure"
+      - "traefik.http.routers.airdefenders.tls=true"
+      - "traefik.http.routers.airdefenders.middlewares={{ airdefenders_traefik_mesh_only_middleware }}"
+      - "traefik.http.services.airdefenders.loadbalancer.server.port={{ airdefenders_container_port }}"
+{% else %}
+    labels:
+      # File-provider mode: routing is owned by the Traefik dynamic config
+      # at {{ airdefenders_traefik_dynamic_dir }}/{{ airdefenders_traefik_dynamic_filename }}.
+      - "traefik.enable=false"
+{% endif %}
+{% if airdefenders_zenoh_enabled | bool and airdefenders_zenoh_network | length > 0 %}
+    depends_on:
+      - airdefenders-zenoh-sidecar
+{% endif %}
+    networks:
+      - {{ airdefenders_traefik_network_resolved | default('netbird_netbird') }}
+{% if airdefenders_zenoh_enabled | bool and airdefenders_zenoh_network | length > 0 %}
+      - zenoh
+{% endif %}
+
+{% if airdefenders_zenoh_enabled | bool and airdefenders_zenoh_network | length > 0 %}
+  # rest-pub-bridge sidecar — gives the Go publisher a native mTLS Zenoh
+  # identity. The game PUTs events here (ZENOH_REST_ENDPOINT points at this
+  # container); the sidecar re-publishes each sample over a native mTLS
+  # session presenting CN={{ airdefenders_zenoh_vendor }}-trial-peer, so the
+  # router's access_control admits the write to {{ airdefenders_zenoh_vendor }}/**.
+  # See docs/design/zenoh-rest-pub-bridge.md + ADR 1023.
+  #
+  # Image pin is read from the sibling .env (AIRDEFENDERS_ZENOH_SIDECAR_IMAGE),
+  # written by the airdefenders role — same rollback ergonomics as the game
+  # image (ADR 0859).
+  airdefenders-zenoh-sidecar:
+    image: ${AIRDEFENDERS_ZENOH_SIDECAR_IMAGE:-{{ airdefenders_zenoh_sidecar_image | default('ghcr.io/' ~ ghcr_org ~ '/rest-pub-bridge:latest') }}}
+    container_name: airdefenders-zenoh-sidecar
+    restart: unless-stopped
+    environment:
+      REST_PUB_BRIDGE_LISTEN: "0.0.0.0:{{ airdefenders_zenoh_sidecar_port }}"
+      REST_PUB_BRIDGE_ENDPOINT: "{{ airdefenders_zenoh_native_endpoint }}"
+      REST_PUB_BRIDGE_CERT: "/certs/{{ airdefenders_zenoh_vendor }}-cert.pem"
+      REST_PUB_BRIDGE_KEY: "/certs/{{ airdefenders_zenoh_vendor }}-key.pem"
+      REST_PUB_BRIDGE_ROOT_CA: "/ca/ca-root.pem"
+      # Defense-in-depth: the sidecar holds a real vendor cert, so it only
+      # forwards keys under this prefix (the router ACL also scopes the cert
+      # to {{ airdefenders_zenoh_vendor }}/**; this is the belt to that suspenders).
+      REST_PUB_BRIDGE_ALLOW_PREFIX: "{{ airdefenders_zenoh_vendor }}/"
+      RUST_LOG: "{{ airdefenders_zenoh_sidecar_rust_log }}"
+    volumes:
+      # Per-vendor leaf cert + key (minted by bootstrap-airdefenders-portal.sh,
+      # placed at {{ airdefenders_zenoh_sidecar_cert_dir }} on the host).
+      - "{{ airdefenders_zenoh_sidecar_cert_dir }}:/certs:ro"
+      # Shared trial-fabric CA root — separate mount so it doesn't collide
+      # with the read-only /certs bind above.
+      - "{{ airdefenders_zenoh_sidecar_ca_root_src }}:/ca/ca-root.pem:ro"
+    networks:
+      - zenoh
+{% endif %}
+
+volumes:
+  airdefenders-data:
+
+networks:
+  {{ airdefenders_traefik_network_resolved | default('netbird_netbird') }}:
+    external: true
+{% if airdefenders_zenoh_enabled | bool and airdefenders_zenoh_network | length > 0 %}
+  zenoh:
+    name: {{ airdefenders_zenoh_network }}
+    external: true
+{% endif %}

@@ -1,0 +1,114 @@
+name: airdefenders-image
+# Builds ops/serve/airdefenders/Dockerfile (Chainguard Go, static
+# distroless) and publishes to ghcr.io/<owner>/airdefenders.
+#
+# One image: a pure-Go static binary with the Zenoh REST publisher linked
+# in. The ZENOH_PUBLISH environment variable decides at run time whether
+# the publisher subscribes to the in-process event bus.
+#
+# Native per-architecture builds, combined into one manifest:
+#   - linux/amd64 on ubuntu-24.04
+#   - linux/arm64 on ubuntu-24.04-arm
+#
+# Tag scheme:
+#   - On main push:                `:latest` + `:sha-<short>`
+#   - On `airdefenders/v*` tag:    `:<tag-name>` (e.g. `:v0.1.0`)
+#   - On any build:                `:sha-<short>` (always)
+#
+# Build body: .github/workflows/_image-build.yml (shared).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ops/serve/airdefenders/**'
+      - '.github/workflows/airdefenders-image.yml'
+    tags: ['airdefenders/v*']
+  pull_request:
+    paths:
+      - 'ops/serve/airdefenders/**'
+      - '.github/workflows/airdefenders-image.yml'
+  workflow_dispatch:
+
+# Supersede in-flight runs for the same ref. A push during review used to
+# leave the previous run going to completion, so a branch pushed three
+# times paid three times for an answer only the last one needed. Keyed on
+# the workflow plus the ref, and NEVER cancels on main — a merge-commit run
+# is the one whose result is recorded.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  detect-relevant-changes:
+    # Same redundant-rebuild guard as brief-image / panoscope-image
+    # (per docs/design/ci-redundant-rebuild-guard.md). Evaluates against
+    # the latest push's delta rather than the PR's full diff, so a merge
+    # of main that brings in workflow-irrelevant files doesn't re-fire.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - id: filter
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && format('{0}^', github.event.pull_request.head.sha) || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          # Push events (branch main + release tags) are already gated by this
+          # workflow's native on.push.paths filter — the run only STARTS when a
+          # relevant path changed, so on push we ALWAYS build. The manual
+          # parent..HEAD delta below silently false-skipped a real main-push
+          # image build (panoscope #1807) despite its changed-file list clearly
+          # containing relevant paths; on push that is pure downside (a lost
+          # deployable image), since native on.push.paths already did the
+          # filtering. The delta dedup is only useful — and only harmless, since
+          # PR builds never publish images — on pull_request syncs. See
+          # docs/design/ci-redundant-rebuild-guard.md.
+          if [ "${GITHUB_EVENT_NAME:-}" = "push" ]; then
+            echo "push event — native on.push.paths already gated this run to a relevant-path change; building"
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$BASE_SHA" ] || [ "$BASE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            echo "No base ref (new branch / initial push) — failing open"
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git cat-file -e "$BASE_SHA" 2>/dev/null; then
+            git fetch --depth=1 origin "$BASE_SHA" 2>/dev/null || {
+              echo "Could not fetch base $BASE_SHA — failing open"
+              echo "relevant=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            }
+          fi
+          CHANGED=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          echo "Files changed in latest push ($BASE_SHA..$HEAD_SHA):"
+          echo "$CHANGED" | sed 's/^/  /'
+          if echo "$CHANGED" | grep -qE '^ops/serve/airdefenders/|^\.github/workflows/airdefenders-image\.yml$'; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  image:
+    needs: detect-relevant-changes
+    if: needs.detect-relevant-changes.outputs.relevant == 'true' || github.event_name == 'workflow_dispatch'
+    uses: ./.github/workflows/_image-build.yml
+    permissions:
+      contents: read
+      packages: write
+    secrets: inherit
+    with:
+      image_name: airdefenders
+      tag_prefix: airdefenders
+      context: ops/serve/airdefenders
+      file: ops/serve/airdefenders/Dockerfile
+      description: "Air Defenders game server (multiplayer + Zenoh REST publisher gated by ZENOH_PUBLISH env var)"

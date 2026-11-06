@@ -1,0 +1,42 @@
+// airdefenders missile.intercept v1 — emitted on the tick when an
+// interceptor's proximity fuse triggers a kill (shahed within
+// PROX_RADIUS of the explosion). One event per shahed killed; if one
+// blast kills two shaheds, two events fire.
+//
+// Source of truth for the payload field list:
+//   docs/design/airdefenders-multiplayer.md §"missile.intercept"
+// Producer: ops/serve/airdefenders/game.go (proximity-fuse kinetic
+// path).
+// Wire format on the fabric: JSON inside the envelope's `payload` map.
+
+syntax = "proto3";
+
+package airdefenders.v1;
+
+import "common.proto";
+
+message MissileIntercept {
+  // Entity id of the interceptor whose proximity fuse triggered the
+  // kill. Matches the eid that was published on missile.fired earlier
+  // in this room's history.
+  uint32 interceptor_eid = 1;
+
+  // Entity id of the shahed that was killed. Matches the eid that was
+  // published on radar.detection earlier in this room's history.
+  uint32 shahed_eid = 2;
+
+  // Canvas position at which the kill registered (typically near the
+  // shahed's last-known position).
+  Vec2 kill_pos = 3;
+
+  // Owning player_id of the interceptor that scored the kill (used
+  // for contribution ranking + life-up attribution per
+  // docs/design/airdefenders-multiplayer.md §"Shared state model").
+  uint32 player_id = 4;
+
+  // Wave number at emission time (1-based).
+  uint32 wave = 5;
+
+  // Server tick counter at emission time.
+  uint32 tick = 6;
+}

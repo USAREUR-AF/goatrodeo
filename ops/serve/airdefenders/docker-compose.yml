@@ -1,0 +1,36 @@
+# Air Defenders — Docker Compose (Ansible-managed; see ops/ansible/airdefenders.yml)
+#
+# Service bundles the game HTML + shared-score API in one container.
+# Storage: SQLite on a named Docker volume (nonroot UID 65532 from the
+# Chainguard static runtime would not be able to write to a host bind-mount).
+
+services:
+  airdefenders:
+    build: .
+    container_name: airdefenders
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8095:8095"
+    environment:
+      PORT: "8095"
+      DB_PATH: "/data/scores.db"
+    volumes:
+      - airdefenders-data:/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=netbird_netbird"
+      - "traefik.http.routers.airdefenders.rule=Host(`airdefenders.netbird.legacy.example`)"
+      - "traefik.http.routers.airdefenders.entrypoints=websecure"
+      - "traefik.http.routers.airdefenders.tls=true"
+      - "traefik.http.routers.airdefenders.middlewares=mesh-only"
+      - "traefik.http.services.airdefenders.loadbalancer.server.port=8095"
+    networks:
+      - traefik
+
+volumes:
+  airdefenders-data:
+
+networks:
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:-netbird_netbird}

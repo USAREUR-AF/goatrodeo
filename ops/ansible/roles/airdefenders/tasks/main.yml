@@ -1,0 +1,8 @@
+---
+# Declared end state (ADR 1206): a site that sets `airdefenders_enabled: false` in its
+# group_vars does not run airdefenders, so no play that reaches this role deploys it.
+# Unset keeps the role's long-standing behaviour (deploy). The gate that keeps
+# this true for every catalog service: ops/ci/check-role-honours-presence-flag.py.
+- name: airdefenders | deploy (skipped where the site declares airdefenders_enabled false)
+  ansible.builtin.import_tasks: deploy.yml
+  when: airdefenders_enabled | default(true) | bool

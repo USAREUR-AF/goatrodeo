@@ -1,0 +1,56 @@
+# The leak gate: a required check on every pull request to main.
+#
+# Fails when a pull request adds a name of the maintainers' own deployments
+# (a host, zone, address, group or person) or material that is never right
+# here (a private key, an access key id, a token). The list of names is not in
+# this repository: it is the encrypted repository secret GOAT_LEAK_NEEDLES,
+# which only owners can set. A hit names the file, the line and a 12-character
+# id of the needle; the needle itself is never printed.
+#
+# pull_request_target runs this file and .github/leak-gate/scan-diff.py as
+# they are on main, with the secret, also for pull requests from forks. The
+# pull request's commits are fetched as data and diffed; they are never
+# checked out, built or run, so a change to the gate takes effect only after
+# it merges.
+name: leak-gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: leak-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  leak-gate:
+    name: leak-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: check out the base branch (the gate as merged)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: fetch the pull request's commits as data
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          git fetch --no-tags --quiet origin "+refs/pull/${PR_NUMBER}/head:refs/leak-gate/head"
+          if ! git cat-file -e "${HEAD_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --quiet origin "${HEAD_SHA}"
+          fi
+
+      - name: scan the added lines
+        env:
+          GOAT_LEAK_NEEDLES: ${{ secrets.GOAT_LEAK_NEEDLES }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 .github/leak-gate/scan-diff.py --base "${BASE_SHA}" --head "${HEAD_SHA}"

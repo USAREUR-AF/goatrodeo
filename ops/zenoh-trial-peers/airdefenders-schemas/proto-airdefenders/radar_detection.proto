@@ -1,0 +1,47 @@
+// airdefenders radar.detection v1 — emitted on the tick when a shahed
+// transitions from visible == 0 → visible > 0 (first frame any radar
+// tracks it).
+//
+// Source of truth for the payload field list:
+//   docs/design/airdefenders-multiplayer.md §"radar.detection"
+// Producer: ops/serve/airdefenders/game.go (visibility transition path).
+// Wire format on the fabric: JSON-encoded JSON payload inside the
+// envelope's `payload` map. This descriptor lets the portal inspector
+// dynamicpb-decode samples and the schema viewer render the field tree.
+
+syntax = "proto3";
+
+package airdefenders.v1;
+
+import "common.proto";
+
+message RadarDetection {
+  // Server-minted entity id of the shahed (stable for the shahed's
+  // lifetime; reused as map key in state.tick.shaheds).
+  uint32 shahed_eid = 1;
+
+  // Shahed canvas position at first-detection tick.
+  Vec2 shahed_pos = 2;
+
+  // Shahed velocity vector at first-detection tick (canvas px per
+  // tick, server runs at 30 Hz per docs/design/airdefenders-multiplayer.md §"Tick rate").
+  Vec2 shahed_vel = 3;
+
+  // True when this shahed is the high-speed straight-line cruise
+  // variant (post-wave-N spawn variant; see index.html L884-908).
+  bool shahed_cruise = 4;
+
+  // Index of the radar that first detected this shahed (0-based;
+  // index in state.tick.radars).
+  uint32 radar_idx = 5;
+
+  // Canvas position of that radar.
+  Vec2 radar_pos = 6;
+
+  // Wave number at emission time (1-based).
+  uint32 wave = 7;
+
+  // Server tick counter at emission time (monotonic; 30 Hz; resets
+  // on server restart).
+  uint32 tick = 8;
+}

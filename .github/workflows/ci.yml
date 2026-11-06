@@ -1,0 +1,46 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  airdefenders:
+    name: airdefenders (go vet + test)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ops/serve/airdefenders
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ops/serve/airdefenders/go.mod
+      - run: go vet ./...
+      - run: go test ./...
+  ansible:
+    name: playbooks parse
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      # the role depends on goatcore's roles (rollback-ledger and others)
+      - uses: actions/checkout@v4
+        with:
+          repository: usareur-af/goatcore
+          path: _goatcore
+      - run: pipx install ansible-core
+      - run: |
+          cd ops/ansible
+          for p in airdefenders.yml airdefenders-deploy.yml; do
+            ANSIBLE_ROLES_PATH="roles:$GITHUB_WORKSPACE/_goatcore/ops/ansible/roles" ansible-playbook --syntax-check -i localhost, -e airdefenders_host_group=all "$p"
+          done

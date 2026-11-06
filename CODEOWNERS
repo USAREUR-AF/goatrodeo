@@ -1,0 +1,3 @@
+# CODEOWNERS — review routing. Branch protection requires one approving review
+# from a code owner; the last matching line wins, so broad rules come first.
+*                                   @USAREUR-AF/goat-owners

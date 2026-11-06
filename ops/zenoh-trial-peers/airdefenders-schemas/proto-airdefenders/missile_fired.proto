@@ -1,0 +1,45 @@
+// airdefenders missile.fired v1 — emitted on the tick when an
+// interceptor is created (post-arming for armed/autopilot modes;
+// immediate for manual).
+//
+// Source of truth for the payload field list:
+//   docs/design/airdefenders-multiplayer.md §"missile.fired"
+// Producer: ops/serve/airdefenders/game.go (fireFromLauncher /
+// arm-then-fire paths).
+// Wire format on the fabric: JSON inside the envelope's `payload` map.
+
+syntax = "proto3";
+
+package airdefenders.v1;
+
+import "common.proto";
+
+message MissileFired {
+  // Server-minted entity id of the interceptor (stable for its life;
+  // map key in state.tick.interceptors).
+  uint32 interceptor_eid = 1;
+
+  // Index of the launcher that fired (0-based; index in
+  // state.tick.launchers).
+  uint32 launcher_idx = 2;
+
+  // Canvas position of the launcher at fire time.
+  Vec2 launcher_pos = 3;
+
+  // Owning player_id (monotonic per-Hub; 0 means "system-fired" —
+  // see docs/design/airdefenders-multiplayer.md §"interceptors[].owner_player_id == 0"
+  // — used for ARMED-mode launches where the original single-player
+  // path didn't track owner either).
+  uint32 player_id = 4;
+
+  // Fire-mode at the moment of fire. 0=manual, 1=armed-proximity,
+  // 2=autopilot. Matches the L.fireMode rotation in
+  // ops/serve/airdefenders/index.html L778-782.
+  uint32 fire_mode = 5;
+
+  // Wave number at emission time (1-based).
+  uint32 wave = 6;
+
+  // Server tick counter at emission time.
+  uint32 tick = 7;
+}

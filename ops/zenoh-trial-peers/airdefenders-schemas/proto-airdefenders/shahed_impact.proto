@@ -1,0 +1,36 @@
+// airdefenders shahed.impact v1 — emitted on the tick when a shahed
+// reaches y >= GAME_H (ground impact; life lost; i.e. a leaker).
+//
+// Source of truth for the payload field list:
+//   docs/design/airdefenders-multiplayer.md §"shahed.impact"
+// Producer: ops/serve/airdefenders/game.go (impact / ground-touch
+// branch of the shahed move path).
+// Wire format on the fabric: JSON inside the envelope's `payload` map.
+
+syntax = "proto3";
+
+package airdefenders.v1;
+
+import "common.proto";
+
+message ShahedImpact {
+  // Entity id of the leaking shahed. Matches the eid that was
+  // published on radar.detection earlier in this room's history (a
+  // shahed that was never detected — improbable in v1 since every
+  // shahed transits a radar's range — would still emit this with the
+  // same eid).
+  uint32 shahed_eid = 1;
+
+  // Canvas position at which the shahed crossed the ground line.
+  Vec2 impact_pos = 2;
+
+  // Lives remaining in the shared room pool AFTER this impact's
+  // decrement is applied. 0 means GAME_OVER.
+  uint32 lives_remaining = 3;
+
+  // Wave number at emission time (1-based).
+  uint32 wave = 4;
+
+  // Server tick counter at emission time.
+  uint32 tick = 5;
+}

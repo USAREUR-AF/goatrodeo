@@ -1,0 +1,119 @@
+---
+# Defaults for the `airdefenders` role.
+#
+# Thin role: doesn't bring the compose stack up itself (the playbook
+# ops/ansible/airdefenders.yml owns the compose lifecycle for legacy-
+# compatibility reasons). What this role does own:
+#   1. Image-pin SoT (airdefenders_image below) — single var the rest
+#      of the substrate reads from.
+#   2. Write AIRDEFENDERS_IMAGE=<image> to {{ airdefenders_dir }}/.env
+#      so compose-time substitution in the sibling docker-compose.yml's
+#      `image: ${AIRDEFENDERS_IMAGE:-...}` line picks up the pin.
+#   3. Append the per-host NDJSON deploy-history ledger per ADR 0859.
+#
+# The image is built + pushed by .github/workflows/airdefenders-image.yml
+# on every merge to main that touches ops/serve/airdefenders/. Pin by
+# multi-arch index digest (sha256 of the OCI image index) — `docker
+# compose pull` resolves the right arch leaf for the host (arm64 or amd64).
+
+airdefenders_image: ghcr.io/{{ ghcr_org }}/airdefenders:sha-3d825e8@sha256:df086ddae15d846191ca74fda1fae9b3d903e25969504c7b366eae920c0be692
+
+# Where the compose stack lives on the host. Mirrors the airdefenders
+# playbook's `airdefenders_dir` default — kept in sync deliberately.
+airdefenders_dir: /opt/goat/airdefenders
+
+# ----- Per-site overridable defaults --------------
+# These live here (role defaults, lowest precedence) instead of inside
+# the playbook's play-level `vars:` block so that group_vars/<group>/
+# overrides them — play-level vars BEAT group_vars per Ansible's
+# documented precedence.
+
+# Hostname Traefik routes by. A file-provider site overrides it in group_vars.
+airdefenders_url_host: "airdefenders.{{ netbird_domain | default('netbird.legacy.example') }}"
+
+# Traefik integration mode: docker (label-driven) or file
+# (dynamic-config-driven).
+airdefenders_traefik_provider: docker
+
+# Docker network Traefik joins. Empty = auto-detect via `docker inspect
+# netbird-traefik`. A file-provider site sets it explicitly.
+airdefenders_traefik_network: ""
+
+# Cloudflare A records — file-provider sites only (docker-provider sites use
+# mesh DNS via Netbird DNS group).
+airdefenders_publish_cloudflare_dns: false
+
+# Mesh-only middleware reference for the Traefik router. Docker-provider
+# sites: `mesh-only`. File-provider sites override to
+# `mesh-only-allowlist@file` in group_vars.
+airdefenders_traefik_mesh_only_middleware: "mesh-only"
+
+# ----- Multiplayer Zenoh publisher (via rest-pub-bridge mTLS sidecar) --
+# When enabled, the game's runtime env sets ZENOH_PUBLISH=1 +
+# ZENOH_REST_ENDPOINT and the Go server PUTs every game event to the
+# rest-pub-bridge sidecar, which re-publishes over native mTLS so the
+# router ACL admits the writes. Off by default — a goatnet flips it true
+# via group_vars/<site>_hosts/airdefenders.yml.
+airdefenders_zenoh_enabled: false
+airdefenders_site_id: "nethost"
+airdefenders_zenoh_rest_endpoint: ""
+airdefenders_zenoh_network: ""
+
+# ----- rest-pub-bridge sidecar (docs/design/zenoh-rest-pub-bridge.md) --
+# Only materialized when airdefenders_zenoh_enabled is true. The sidecar
+# holds the per-vendor leaf and dials the router's native mTLS endpoint.
+#
+# The sidecar image is NOT a role-defaults `*_image` pin: this role's
+# rollback-tracked pin (deploy-history.yml, ADR 0859) is the GAME image,
+# and ops/ci/check-deploy-history.sh is one-image-per-role. The sidecar
+# image fallback lives inline in the compose template
+# (`${AIRDEFENDERS_ZENOH_SIDECAR_IMAGE:-ghcr.io/{{ ghcr_org }}/rest-pub-bridge:latest}`),
+# built + pushed by .github/workflows/rest-pub-bridge-image.yml. To pin a
+# digest at live-fire, set `airdefenders_zenoh_sidecar_image` in
+# group_vars (NOT here) — the role writes it to the compose .env so
+# rollback.sh can flip it, same ergonomics as the game image.
+# HTTP listen port the game PUTs to; must match the host:port in
+# airdefenders_zenoh_rest_endpoint.
+airdefenders_zenoh_sidecar_port: 8000
+# Native mTLS endpoint the sidecar dials on the router (group_vars set the
+# concrete tls/goat-zenoh-router:7447).
+airdefenders_zenoh_native_endpoint: ""
+# Vendor identity axis — drives the cert filename (<vendor>-cert.pem), the
+# CN the router ACL matches (<vendor>-trial-peer), and the publish-prefix
+# allowlist (<vendor>/). MUST be present in zenoh_seed_vendors.
+airdefenders_zenoh_vendor: "airdefenders"
+# Host path holding <vendor>-cert.pem + <vendor>-key.pem, placed by
+# ops/zenoh-trial-peers/bootstrap-airdefenders-portal.sh (uid 65532).
+airdefenders_zenoh_sidecar_cert_dir: "/opt/airdefenders/certs"
+# Trial-fabric CA root the router's server cert chains to — the same file
+# the router itself uses (so its absence means the router isn't deployed).
+airdefenders_zenoh_sidecar_ca_root_src: "/etc/{{ zenoh_stack | default('goat-zenoh') }}/tls/ca-root-cert.pem"
+# Sidecar log filter.
+airdefenders_zenoh_sidecar_rust_log: "rest_pub_bridge=info"
+
+# ----- Authenticated door (ADR 1073) ---------------------------
+# Without a door the Traefik IP allowlist is the ONLY gate: any caller that
+# reaches the mesh is served, and no identity is ever recorded. The door here
+# refuses nobody — its job is attribution.
+# Hydra records one consent grant per (person, client), and that grant is what
+# microscope's hydra-consents adapter reads to answer who reached this surface.
+#
+# EMPTY allowed-groups IS the authenticated door. The default is OFF; a
+# goatnet turns it on in its group_vars. The matrix
+# row says what RUNS: `door: authenticated` is valid only while the door is on
+# somewhere, and `door: mesh-only` only while it is off everywhere —
+# ops/ci/check-group-permissions-parity.sh fails the build either way round.
+airdefenders_oauth2_proxy_enabled: false
+airdefenders_oauth2_proxy_allowed_groups: ""
+# Env-sourced; see docs/operations/local-secrets-pattern.md.
+airdefenders_oauth2_proxy_client_secret: ""
+airdefenders_oauth2_proxy_cookie_secret: ""
+
+# ----- Fabric demo gate ---------------------------------------
+# GET /demo fills the whole co-op room with eight bots, so it is not a game
+# mode: only these groups (the door's X-Forwarded-Groups, comma-separated,
+# case-insensitive) get the DEMO button on the title screens and the /demo
+# page itself. PLATFORM-ADMIN is the canonical name (mesh-and-ory-roles.md);
+# ADMINS is its legacy spelling, dual-accepted until the console port retires
+# it. Only read when the door is on — see the compose template.
+airdefenders_demo_admin_groups: "PLATFORM-ADMIN,ADMINS"

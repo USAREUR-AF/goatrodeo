@@ -1,0 +1,1957 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Air Defenders — Co-op Multiplayer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { background: #0a0a1a; width: 100%; height: 100%; overflow: hidden; touch-action: manipulation; -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+body { display: flex; align-items: center; justify-content: center; font-family: 'Courier New', monospace; }
+#frame { display: flex; flex-direction: column; align-items: center; justify-content: center; width: 100%; height: 100%; }
+canvas { display: block; touch-action: none; }
+#touchControls { display: none; width: 100%; max-width: 800px; padding: 8px; flex-direction: column; gap: 8px; }
+#touchControls.touch { display: flex; }
+#touchControls .row { display: flex; gap: 8px; }
+#touchControls .row > * { flex: 1; }
+#touchControls button { min-height: 56px; font-family: 'Courier New', monospace; font-weight: bold; font-size: 14px; color: #cce; background: #1a1a2a; border: 2px solid #444; border-radius: 6px; padding: 8px; touch-action: manipulation; user-select: none; -webkit-user-select: none; }
+#touchControls button.fire { background: #2a0a0a; border-color: #ff6644; color: #ffcc66; min-height: 68px; font-size: 18px; flex: 2; }
+#touchControls button.adv  { background: #0a1a2a; border-color: #44aaff; color: #aaddff; }
+#touchControls button.mode { border-color: #ffcc00; color: #ffcc00; }
+#touchControls button.sup  { border-color: #00aaff; color: #00aaff; }
+#touchControls button.dir  { background: #0a2a1a; border-color: #00cc66; color: #aaffcc; font-size: 22px; min-height: 64px; flex: 1; }
+#touchControls button.dir.held { background: #1a4a2a; filter: brightness(1.4); }
+#touchControls button:active { transform: scale(0.97); filter: brightness(1.3); }
+#touchControls button[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div id="frame">
+  <canvas id="game"></canvas>
+  <div id="touchControls">
+    <div class="row">
+      <button id="btnLeft"  class="dir" type="button" aria-label="Move launcher left">&#9664; MOVE</button>
+      <button id="btnRight" class="dir" type="button" aria-label="Move launcher right">MOVE &#9654;</button>
+    </div>
+    <div class="row">
+      <button id="btnMode" class="mode" type="button">MODE</button>
+      <button id="btnSup"  class="sup"  type="button">RESUPPLY</button>
+    </div>
+    <div class="row">
+      <button id="btnFire" class="fire" type="button">FIRE</button>
+      <button id="btnAdv"  class="adv"  type="button">START</button>
+    </div>
+  </div>
+</div>
+<input id="nameInput" type="text" maxlength="14" autocomplete="off" spellcheck="false"
+       style="position:absolute; display:none; font-family:'Courier New',monospace;
+              font-size:18px; background:#0a1a0a; color:#00ff88; border:2px solid #00aa66;
+              border-radius:4px; text-align:center; padding:8px 12px; width:240px;
+              outline:none; z-index:10;">
+<script>
+// ============================================================================
+// Air Defenders — co-op multiplayer renderer.
+// Per docs/design/airdefenders-multiplayer.md. The server runs an
+// authoritative 30 Hz tick at /api/mp/ws; this page sends input verbs and
+// renders interpolated state.tick snapshots at 60 fps.
+// ============================================================================
+
+// ─── Per-frame sessionStorage namespacing ──────────────────────────────────
+// The /demo grid embeds one /mp?bot=<persona> per persona as same-origin
+// iframes. sessionStorage is shared across all same-origin frames in one tab
+// (keyed by the top-level browsing context), so the per-session keys
+// (mp_reconnect_token, mp_name) would collide — every bot frame would read and
+// stomp the same reconnect token and fight over one player slot. When a bot
+// persona is set, suffix those keys per-persona so each frame keeps its own.
+// Normal single-window play (no ?bot=) keeps the bare keys, so a human's
+// reconnect token survives a page reload exactly as before.
+const _botParam = (new URLSearchParams(window.location.search).get('bot') || '').toLowerCase();
+const SS_SUFFIX = _botParam ? ('::' + _botParam) : '';
+const ssGet = k => sessionStorage.getItem(k + SS_SUFFIX);
+const ssSet = (k, v) => sessionStorage.setItem(k + SS_SUFFIX, v);
+const ssDel = k => sessionStorage.removeItem(k + SS_SUFFIX);
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const GAME_W = 800, GAME_H = 700;
+canvas.width = GAME_W;
+canvas.height = GAME_H;
+
+const touchControls = document.getElementById('touchControls');
+const isTouchDevice = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+if (isTouchDevice) touchControls.classList.add('touch');
+
+function resizeCanvas() {
+  const vv = window.visualViewport;
+  const w = vv ? vv.width : window.innerWidth;
+  const h = vv ? vv.height : window.innerHeight;
+  // Reserve room for the HTML touch-controls strip when it's visible.
+  // offsetHeight is 0 before layout; clientHeight after CSS applies.
+  const stripH = (isTouchDevice && touchControls) ? (touchControls.offsetHeight || 0) : 0;
+  const availH = Math.max(200, h - stripH);
+  const margin = Math.min(w, availH) < 500 ? 1.0 : 0.98;
+  const scale = Math.min(w / GAME_W, availH / GAME_H) * margin;
+  canvas.style.width = (GAME_W * scale) + 'px';
+  canvas.style.height = (GAME_H * scale) + 'px';
+}
+// First sizing happens after the touchControls strip lays out so we know its
+// height. requestAnimationFrame gives the browser one paint to compute that.
+requestAnimationFrame(resizeCanvas);
+window.addEventListener('resize', resizeCanvas);
+if (window.visualViewport) window.visualViewport.addEventListener('resize', resizeCanvas);
+window.addEventListener('orientationchange', resizeCanvas);
+
+const nameInput = document.getElementById('nameInput');
+
+// ─── High-score loader ──────────────────────────────────────────────────
+// Fetches /api/scores?period=all&mode=mp lazily; throttled to 60 s. We render
+// only the top 5 in the title-screen panel.
+function fetchHighScores(force) {
+  const now = performance.now();
+  if (!force && now - MP.highScoresFetchedAt < 60000 && MP.highScores.length > 0) return;
+  MP.highScoresFetchedAt = now;
+  fetch('/api/scores?period=all&mode=mp', { cache: 'no-store' })
+    .then(r => r.json())
+    .then(j => { if (Array.isArray(j.scores)) MP.highScores = j.scores; })
+    .catch(() => { /* offline-mode: leave whatever we last had */ });
+}
+
+// ─── Per-player name edit (TITLE) ───────────────────────────────────────
+// The nameInput element sits absolutely positioned over the canvas while the
+// player edits. Persists to localStorage so SP + MP share the name, and to
+// sessionStorage so reconnects within the same tab keep the most-recent edit
+// even before SP has been visited. Sends input.set_name on submit so the
+// server-side roster picks up the change without waiting for a reconnect.
+function positionNameInput() {
+  if (nameInput.style.display === 'none') return;
+  const r = canvas.getBoundingClientRect();
+  const w = nameInput.offsetWidth || 240;
+  nameInput.style.left = (r.left + r.width / 2 - w / 2) + 'px';
+  nameInput.style.top  = (r.top  + r.height * 0.66) + 'px';
+}
+window.addEventListener('resize', positionNameInput);
+if (window.visualViewport) window.visualViewport.addEventListener('resize', positionNameInput);
+
+function openNameEditor() {
+  const cur = (localStorage.getItem('airdefenders_name') || ssGet('mp_name') || '').toUpperCase();
+  nameInput.value = cur.slice(0, 14);
+  nameInput.style.display = 'block';
+  positionNameInput();
+  nameInput.focus();
+  nameInput.select();
+}
+function closeNameEditor(commit) {
+  if (commit) {
+    const raw = (nameInput.value || '').trim();
+    if (raw) {
+      // Same normalisation envelope the server applies (uppercase + restricted
+      // charset). Client-side strip lets the user see what'll actually land.
+      const clean = raw.toUpperCase().replace(/[^A-Z0-9 _-]/g, '').slice(0, 14);
+      if (clean) {
+        localStorage.setItem('airdefenders_name', clean);
+        ssSet('mp_name', clean);
+        MP.send('input.set_name', { name: clean });
+      }
+    }
+  }
+  nameInput.style.display = 'none';
+  nameInput.blur();
+}
+nameInput.addEventListener('keydown', e => {
+  e.stopPropagation();
+  if (e.code === 'Enter') { e.preventDefault(); closeNameEditor(true); }
+  else if (e.code === 'Escape') { e.preventDefault(); closeNameEditor(false); }
+});
+nameInput.addEventListener('blur', () => {
+  // Tap-outside should commit (mobile soft keyboard's done-button collapses
+  // before any DOM click handler can fire, so blur is the only signal we
+  // get). Desktop users still get the Enter / Escape paths above.
+  if (nameInput.style.display !== 'none') closeNameEditor(true);
+});
+
+function canvasPt(clientX, clientY) {
+  const r = canvas.getBoundingClientRect();
+  return { x: (clientX - r.left) * (GAME_W / r.width), y: (clientY - r.top) * (GAME_H / r.height) };
+}
+function inBtn(pt, b) { return pt.x >= b.x && pt.x <= b.x + b.w && pt.y >= b.y && pt.y <= b.y + b.h; }
+
+const BTN_BACK = { x: 15, y: 15, w: 130, h: 32 };
+// MODE + RESUPPLY buttons match single-player y-position (GAME_H - 115 = 585) so they
+// don't cover the launcher chassis or low-flying shaheds. Only rendered on touch devices;
+// desktop uses Tab + R keybindings.
+const BTN_FIRE_MODE = { x: 15, y: GAME_H - 115, w: 180, h: 40 };
+const BTN_RESUPPLY = { x: GAME_W - 195, y: GAME_H - 115, w: 180, h: 40 };
+const BTN_BACK_FROM_OVER = { x: GAME_W / 2 - 130, y: 540, w: 260, h: 44 };
+// TITLE-screen EDIT NAME button — small, near the controls block. Tap pops up
+// the nameInput overlay. Always rendered on TITLE; works on both desktop +
+// touch (touch users get the soft keyboard via the input's focus event).
+const BTN_EDIT_NAME = { x: GAME_W / 2 - 130, y: 420, w: 260, h: 36 };
+// TITLE-phase DEMO button — admins only (see ME below). Top-right corner,
+// opposite the BACK button; hidden inside a bot frame (a bot never needs it).
+const BTN_DEMO = { x: GAME_W - 275, y: 15, w: 260, h: 32 };
+
+// ── Who is looking? (DEMO button) ─────────────────────────────────────────
+// GET /api/me says whether the viewer may run the fabric demo. Behind the
+// authenticated door the server reads the proxy's X-Forwarded-Groups; with no
+// door it answers demo_admin=false for everyone (fail closed). The button is
+// drawn and hit-tested only when demo_admin is true, so ordinary players never
+// see it. A network error or 401 (no session yet) means "not an admin".
+const ME = { demo_admin: false, user: '' };
+fetch('/api/me', { credentials: 'same-origin', cache: 'no-store' })
+  .then(r => r.ok ? r.json() : null)
+  .then(v => { if (v) { ME.demo_admin = !!v.demo_admin; ME.user = v.user || ''; } })
+  .catch(() => {});
+// One click: the /demo page opens in its own tab (named, so a second click
+// focuses the same tab instead of starting a second fleet) and the eight bots
+// fill the room and start publishing. Close that tab to stop the demo.
+// On a goatnet (host airdefenders.<site>.<zone>) the same click also opens
+// panoscope with the airdefenders publisher pre-selected. The Block 94 `key=`
+// form is used, not `vendor=`: on a slot-pool goatnet the publisher node
+// carries no vendor tag, so `?vendor=airdefenders` selects nothing,
+// while `?key=<topic>` resolves to the topic's publisher and
+// opens its side panel with the live stream.
+// The demo tab's top bar carries the same panoscope link for the case where
+// the browser's popup rule lets only one window through per click.
+// <site> from airdefenders.<site>.<zone>; the label after the leading one.
+const PANOSCOPE_SITE = (window.location.host.split('.')[1] || '');
+function openFabricDemo() {
+  const host = window.location.host;
+  if (/^airdefenders\./.test(host)) {
+    window.open(window.location.protocol + '//' + host.replace(/^airdefenders\./, 'panoscope.') + '/?key=' + encodeURIComponent('airdefenders/' + PANOSCOPE_SITE + '/missile/fired/v1'),
+                'airdefenders-fabric-panoscope');
+  }
+  window.open('/demo', 'airdefenders-fabric-demo');
+}
+function drawDemoButton(btn) {
+  if (!ME.demo_admin) return;
+  ctx.fillStyle = '#2a1a0a';
+  ctx.fillRect(btn.x, btn.y, btn.w, btn.h);
+  ctx.strokeStyle = '#ffaa33';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(btn.x, btn.y, btn.w, btn.h);
+  ctx.fillStyle = '#ffaa33';
+  ctx.font = 'bold 13px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('\u25B6 RUN FABRIC DEMO  (admin)', btn.x + btn.w / 2, btn.y + 21);
+  ctx.lineWidth = 1;
+}
+
+// ============================================================================
+// MP — WebSocket connection + snapshot store + input dispatch.
+// ============================================================================
+
+const MP = {
+  ws: null,
+  playerId: 0,
+  color: '#00ff88',
+  serverTickHz: 30,
+  roster: [],
+  snapPrev: null,
+  snapCurr: null,
+  snapCurrRecvTime: 0,
+  reconnectAttempt: 0,
+  reconnectTimer: null,
+  reconnecting: false,
+  bannerMessage: 'CONNECTING…',
+  // High-score state — populated by fetchHighScores() on TITLE phase enter and
+  // refreshed lazily. Server returns up to 10 entries; we render the top 5.
+  highScores: [],
+  highScoresFetchedAt: 0,
+
+  send(type, fields) {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    try { this.ws.send(JSON.stringify(Object.assign({ type }, fields || {}))); }
+    catch (_) { /* ignore */ }
+  },
+
+  myLauncher() {
+    if (!this.snapCurr || !this.snapCurr.launchers) return null;
+    return this.snapCurr.launchers.find(l => l.owner_player_id === this.playerId) || null;
+  },
+
+  myActiveInterceptorEid() {
+    if (!this.snapCurr || !this.snapCurr.interceptors) return null;
+    let best = null;
+    for (const it of this.snapCurr.interceptors) {
+      if (it.owner_player_id === this.playerId && it.alive) {
+        if (!best || it.eid > best.eid) best = it;
+      }
+    }
+    return best ? best.eid : null;
+  },
+
+  rosterEntry(pid) { return this.roster.find(p => p.player_id === pid); },
+
+  ownerColor(pid) {
+    const e = this.rosterEntry(pid);
+    return (e && e.color) || '#888';
+  },
+
+  connect() {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = protocol + '//' + window.location.host + '/api/mp/ws';
+    this.bannerMessage = 'CONNECTING…';
+    let ws;
+    try { ws = new WebSocket(url); } catch (e) {
+      this.bannerMessage = 'CONNECTION FAILED — RETRY?';
+      this._scheduleReconnect();
+      return;
+    }
+    this.ws = ws;
+    ws.onopen = () => {
+      this.reconnectAttempt = 0;
+      this.reconnecting = false;
+      const stored = ssGet('mp_name') || '';
+      const token = ssGet('mp_reconnect_token') || '';
+      this.send('hello', { name: stored, reconnect_token: token });
+    };
+    ws.onmessage = ev => this._onMessage(ev.data);
+    ws.onclose = ev => {
+      if (ev.code === 4001) ssDel('mp_reconnect_token');
+      this.bannerMessage = 'DISCONNECTED — RECONNECTING…';
+      this.reconnecting = true;
+      this._scheduleReconnect();
+    };
+    ws.onerror = () => { /* onclose runs next */ };
+  },
+
+  _scheduleReconnect() {
+    if (this.reconnectTimer) return;
+    const backoffs = [500, 1000, 2000, 4000, 8000];
+    const delay = backoffs[Math.min(this.reconnectAttempt, backoffs.length - 1)];
+    this.reconnectAttempt++;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, delay);
+  },
+
+  _onMessage(data) {
+    let msg;
+    try { msg = JSON.parse(data); } catch (_) { return; }
+    if (!msg || !msg.type) return;
+    switch (msg.type) {
+      case 'welcome':
+        this.playerId = msg.player_id;
+        this.color = msg.color;
+        this.serverTickHz = msg.server_tick_hz || 30;
+        if (msg.reconnect_token) ssSet('mp_reconnect_token', msg.reconnect_token);
+        if (Array.isArray(msg.roster)) this.roster = msg.roster;
+        if (msg.snapshot) this._applySnap(msg.snapshot);
+        this.reconnecting = false;
+        this.bannerMessage = '';
+        break;
+      case 'state.tick':
+        this._applySnap(msg);
+        break;
+      case 'roster.update':
+        if (Array.isArray(msg.roster)) this.roster = msg.roster;
+        break;
+      case 'wave.summary':
+        this.lastWaveSummary = msg;
+        this.selectedKill = null; // new summary clears any prior selection
+        break;
+      case 'game.over':
+        this.lastGameOver = msg;
+        // Refresh high scores so any new top-5 entry shows up on TITLE.
+        fetchHighScores(true);
+        break;
+      case 'ping':
+        this.send('pong', { echo: msg.nonce || '' });
+        break;
+      case 'error':
+        // Non-fatal; visible only via metrics.
+        break;
+    }
+  },
+
+  _applySnap(snap) {
+    this.snapPrev = this.snapCurr;
+    this.snapCurr = snap;
+    this.snapCurrRecvTime = performance.now();
+  },
+
+  // Linear interpolation between snapPrev and snapCurr by alpha.
+  // Returns the interpolated pos for an entity keyed by eid.
+  interpPos(arrName, eid) {
+    if (!this.snapCurr || !this.snapCurr[arrName]) return null;
+    const curr = this.snapCurr[arrName].find(e => e.eid === eid);
+    if (!curr) return null;
+    if (!this.snapPrev || !this.snapPrev[arrName]) return curr.pos;
+    const prev = this.snapPrev[arrName].find(e => e.eid === eid);
+    if (!prev) return curr.pos;
+    const dt = 1000 / this.serverTickHz;
+    const alpha = Math.min(1, Math.max(0, (performance.now() - this.snapCurrRecvTime) / dt));
+    return {
+      x: prev.pos.x + (curr.pos.x - prev.pos.x) * alpha,
+      y: prev.pos.y + (curr.pos.y - prev.pos.y) * alpha,
+    };
+  },
+};
+
+// ============================================================================
+// Input — keyboard + mouse + touch → WS verbs.
+// ============================================================================
+
+const heldKeys = new Set();
+// Touch-only state: mp.html keeps a mouse object for backwards-compat with the
+// touchstart/touchmove handlers (touch-drag-to-steer still uses mouse.x/mouse.y as a
+// scratch buffer). Mouse-move on desktop no longer steers — desktop uses arrow keys
+// matching single-player's title-screen "← ↑ → ↓ steer interceptor (full arc)" doctrine.
+const mouse = { x: GAME_W / 2, y: GAME_H / 2, down: false };
+let lastSteerSent = 0;
+let lastLauncherMoveSent = 0;
+// Last-sent-verb debug ring — toggleable via window.__MP_DEBUG_VERBS = true in devtools;
+// useful to verify A/D launcher_move actually leaves the client.
+const verbLog = [];
+function logVerb(type, fields) {
+  if (!window.__MP_DEBUG_VERBS) return;
+  verbLog.push({ t: performance.now().toFixed(0), type, fields });
+  if (verbLog.length > 50) verbLog.shift();
+  console.log('[mp verb]', type, fields);
+}
+
+// Compute steer aim from held arrow keys. Scheme: aim = interceptor position offset
+// by 200 px in the held direction (dx/dy ∈ {-1,0,1}). 200 px is well beyond any
+// physical turn radius so the server sees "keep going this way" rather than a
+// precise target. Returns null when no arrows held or no active interceptor.
+function arrowSteerAim() {
+  let dx = 0, dy = 0;
+  if (heldKeys.has('ArrowLeft')) dx -= 1;
+  if (heldKeys.has('ArrowRight')) dx += 1;
+  if (heldKeys.has('ArrowUp')) dy -= 1;
+  if (heldKeys.has('ArrowDown')) dy += 1;
+  if (dx === 0 && dy === 0) return null;
+  if (!MP.snapCurr || !MP.snapCurr.interceptors) return null;
+  const eid = MP.myActiveInterceptorEid();
+  if (eid === null) return null;
+  const it = MP.snapCurr.interceptors.find(e => e.eid === eid);
+  if (!it) return null;
+  return { eid, aim: { x: it.pos.x + dx * 200, y: it.pos.y + dy * 200 } };
+}
+
+function maybeSendSteerTouch() {
+  const now = performance.now();
+  if (now - lastSteerSent < 100) return;
+  lastSteerSent = now;
+  const eid = MP.myActiveInterceptorEid();
+  if (eid === null) return;
+  const fields = { interceptor_eid: eid, aim: { x: mouse.x, y: mouse.y } };
+  MP.send('input.steer', fields);
+  logVerb('input.steer', fields);
+}
+
+function pollHeldKeys() {
+  const now = performance.now();
+  // A/D → move OWN launcher. Arrows → steer OWN active interceptor. Independent
+  // physical keys → both planes operable simultaneously (no modifier-key
+  // contention). Mirrors single-player's unified scheme.
+  if ((heldKeys.has('KeyA') || heldKeys.has('KeyD')) && now - lastLauncherMoveSent >= 33) {
+    const myL = MP.myLauncher();
+    if (myL) {
+      let dx = 0;
+      if (heldKeys.has('KeyA')) dx = -6;
+      else if (heldKeys.has('KeyD')) dx = 6;
+      if (dx !== 0) {
+        lastLauncherMoveSent = now;
+        const fields = { launcher_idx: myL.idx, dx };
+        MP.send('input.launcher_move', fields);
+        logVerb('input.launcher_move', fields);
+      }
+    }
+  }
+  // Arrow-only steering during COMBAT.
+  if (!MP.snapCurr || MP.snapCurr.phase !== 'COMBAT') return;
+  if (now - lastSteerSent < 100) return;
+  const steer = arrowSteerAim();
+  if (!steer) return;
+  lastSteerSent = now;
+  const fields = { interceptor_eid: steer.eid, aim: steer.aim };
+  MP.send('input.steer', fields);
+  logVerb('input.steer', fields);
+}
+
+window.addEventListener('keydown', e => {
+  heldKeys.add(e.code);
+  // Suppress browser default for arrow keys + space so page-scroll / button-activation
+  // never interferes. Body is overflow:hidden but this is defense-in-depth and matches
+  // single-player's similar suppression.
+  if (e.code === 'ArrowLeft' || e.code === 'ArrowRight' || e.code === 'ArrowUp' || e.code === 'ArrowDown') {
+    e.preventDefault();
+  }
+  if (e.code === 'Space') {
+    if (document.activeElement === nameInput) return; // typing name
+    if (!MP.snapCurr) return;
+    const phase = MP.snapCurr.phase;
+    if (phase === 'TITLE' || phase === 'EMPLACEMENT' || phase === 'WAVE_END' || phase === 'GAME_OVER') {
+      MP.send('input.state_advance', {});
+    } else if (phase === 'COMBAT') {
+      const myL = MP.myLauncher();
+      if (myL) MP.send('input.fire', { launcher_idx: myL.idx });
+    }
+    e.preventDefault();
+  }
+  if (e.code === 'Tab') {
+    const myL = MP.myLauncher();
+    if (myL) {
+      const next = ((myL.fire_mode || 0) + 1) % 3;
+      MP.send('input.fire_mode', { launcher_idx: myL.idx, mode: next });
+    }
+    e.preventDefault();
+  }
+  if (e.code === 'KeyR') {
+    const myL = MP.myLauncher();
+    if (myL) MP.send('input.resupply', { launcher_idx: myL.idx });
+  }
+  if (e.code === 'KeyB') MP.send('input.bunker_run', {});
+  if (e.code === 'KeyC') MP.send('input.camel_release', {});
+  if (e.code === 'Escape') {
+    if (nameInput.style.display !== 'none') nameInput.style.display = 'none';
+    if (MP.selectedKill !== null && MP.selectedKill !== undefined) MP.selectedKill = null;
+  }
+});
+window.addEventListener('keyup', e => { heldKeys.delete(e.code); });
+
+window.addEventListener('mousemove', e => {
+  // Mouse position tracked for radar-drag in EMPLACEMENT only; steering is keyboard-only
+  // on desktop per the single-player control doctrine. Touch devices use maybeSendSteerTouch
+  // from the touchmove handler below.
+  const p = canvasPt(e.clientX, e.clientY);
+  mouse.x = p.x; mouse.y = p.y;
+});
+
+canvas.addEventListener('mousedown', e => {
+  mouse.down = true;
+  const p = canvasPt(e.clientX, e.clientY);
+  mouse.x = p.x; mouse.y = p.y;
+  if (!MP.snapCurr) return;
+  if (inBtn(p, BTN_BACK)) { window.location.href = '/'; return; }
+  const phase = MP.snapCurr.phase;
+  if (phase === 'TITLE' && inBtn(p, BTN_EDIT_NAME)) { openNameEditor(); return; }
+  if (phase === 'TITLE' && ME.demo_admin && !_botParam && inBtn(p, BTN_DEMO)) { openFabricDemo(); return; }
+  // WAVE_END / GAME_OVER: click a kill marker to freeze-frame it, or click off
+  // to clear the selection. Mirrors solo's index.html L86-L92 + L838-L848.
+  if ((phase === 'WAVE_END' || phase === 'GAME_OVER') && MP.lastWaveSummary) {
+    if (MP.selectedKill !== null && MP.selectedKill !== undefined) {
+      MP.selectedKill = null;
+      return;
+    }
+    const ki = killMarkerIndexAt(p);
+    if (ki >= 0) { MP.selectedKill = ki; return; }
+  }
+  // Bunker RUN button — render-driven only during bunker active phase
+  if (MP.snapCurr.bunker && MP.snapCurr.bunker.phase === 'active' && inBtn(p, BTN_RUN)) {
+    MP.send('input.bunker_run', {});
+    return;
+  }
+  // GAME_OVER restart is SPACE-only — no click-to-restart affordance.
+  if (phase === 'EMPLACEMENT') {
+    // Drag a radar to reposition. Find nearest radar within 20px.
+    if (MP.snapCurr.radars) {
+      let nearest = -1, bestD = 20;
+      for (const r of MP.snapCurr.radars) {
+        const d = Math.hypot(r.pos.x - p.x, r.pos.y - p.y);
+        if (d < bestD) { bestD = d; nearest = r.idx; }
+      }
+      if (nearest >= 0) { mouse.draggingRadar = nearest; return; }
+    }
+  }
+  if (phase === 'COMBAT' && inBtn(p, BTN_FIRE_MODE)) {
+    const myL = MP.myLauncher();
+    if (myL) MP.send('input.fire_mode', { launcher_idx: myL.idx, mode: ((myL.fire_mode || 0) + 1) % 3 });
+    return;
+  }
+  if (phase === 'COMBAT' && inBtn(p, BTN_RESUPPLY)) {
+    const myL = MP.myLauncher();
+    if (myL) MP.send('input.resupply', { launcher_idx: myL.idx });
+    return;
+  }
+  if (phase === 'COMBAT' && p.y > GAME_H - 55) {
+    // Click on launcher bar to fire YOUR launcher.
+    const myL = MP.myLauncher();
+    if (myL) MP.send('input.fire', { launcher_idx: myL.idx });
+    return;
+  }
+  // Phase advances are SPACE-only — no click-to-start / click-to-advance.
+});
+canvas.addEventListener('mouseup', e => {
+  mouse.down = false;
+  if (mouse.draggingRadar !== undefined) mouse.draggingRadar = undefined;
+});
+canvas.addEventListener('mousemove', e => {
+  if (mouse.draggingRadar !== undefined && MP.snapCurr && MP.snapCurr.phase === 'EMPLACEMENT') {
+    const p = canvasPt(e.clientX, e.clientY);
+    const idx = mouse.draggingRadar;
+    MP.send('input.radar_place', { radar_idx: idx, pos: { x: p.x, y: p.y } });
+  }
+});
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const p = canvasPt(t.clientX, t.clientY);
+    if (!MP.snapCurr) continue;
+    if (inBtn(p, BTN_BACK)) { window.location.href = '/'; return; }
+    const phase = MP.snapCurr.phase;
+    if (phase === 'TITLE' && inBtn(p, BTN_EDIT_NAME)) { openNameEditor(); continue; }
+    if (phase === 'TITLE' && ME.demo_admin && !_botParam && inBtn(p, BTN_DEMO)) { openFabricDemo(); return; }
+    // Kill-marker tap at WAVE_END / GAME_OVER
+    if ((phase === 'WAVE_END' || phase === 'GAME_OVER') && MP.lastWaveSummary) {
+      if (MP.selectedKill !== null && MP.selectedKill !== undefined) { MP.selectedKill = null; continue; }
+      const ki = killMarkerIndexAt(p);
+      if (ki >= 0) { MP.selectedKill = ki; continue; }
+    }
+    if (MP.snapCurr.bunker && MP.snapCurr.bunker.phase === 'active' && inBtn(p, BTN_RUN)) {
+      MP.send('input.bunker_run', {}); continue;
+    }
+    if (phase === 'COMBAT' && inBtn(p, BTN_FIRE_MODE)) {
+      const myL = MP.myLauncher();
+      if (myL) MP.send('input.fire_mode', { launcher_idx: myL.idx, mode: ((myL.fire_mode || 0) + 1) % 3 });
+      continue;
+    }
+    if (phase === 'COMBAT' && inBtn(p, BTN_RESUPPLY)) {
+      const myL = MP.myLauncher();
+      if (myL) MP.send('input.resupply', { launcher_idx: myL.idx });
+      continue;
+    }
+    if (phase === 'COMBAT' && p.y > GAME_H - 55) {
+      const myL = MP.myLauncher();
+      if (myL) MP.send('input.fire', { launcher_idx: myL.idx });
+      continue;
+    }
+    if (phase === 'COMBAT') {
+      // touch+drag steers active interceptor (touch-only — desktop uses arrow keys)
+      mouse.x = p.x; mouse.y = p.y;
+      maybeSendSteerTouch();
+      continue;
+    }
+    // Phase advances are SPACE-only — no tap-to-start / tap-to-advance.
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (!MP.snapCurr || MP.snapCurr.phase !== 'COMBAT') return;
+  const t = e.changedTouches[0];
+  const p = canvasPt(t.clientX, t.clientY);
+  mouse.x = p.x; mouse.y = p.y;
+  maybeSendSteerTouch();
+}, { passive: false });
+
+// ============================================================================
+// Render — clear, draw world from MP.snapCurr (interpolated), HUD overlay.
+// ============================================================================
+
+const stars = Array.from({ length: 80 }, () => ({
+  x: Math.random() * GAME_W,
+  y: Math.random() * (GAME_H - 60),
+  b: Math.random() * 0.6 + 0.2,
+}));
+
+function drawStars() {
+  for (const s of stars) {
+    ctx.fillStyle = `rgba(180,200,255,${s.b})`;
+    ctx.fillRect(s.x, s.y, 1, 1);
+  }
+}
+
+// ─── Sweep radar (client-side animation; server-side `visible` per shahed is
+// the authoritative detection bit, the beam is pure visual flair).
+// Constants + algorithm ported verbatim from single-player (index.html L743-L749,
+// L1268-L1299). The angle updates per render frame at ~60 fps; minor inter-client
+// drift is harmless.
+const SWEEP_HZ = 0.25;
+const SWEEP_RATE = (Math.PI * 2 * SWEEP_HZ) / 60; // radians per frame at ~60 fps
+const SWEEP_WIDTH = Math.PI / 4;
+const SWEEP_RANGE = 900;
+const SWEEP_X = GAME_W / 2;
+const SWEEP_Y = GAME_H - 50;
+let sweepAngle = -Math.PI / 2;
+// Per-radar pulse phase (radar idx → phase). Persisted across frames; advanced
+// per render. Mirrors single-player's `r.pulse` field on each radar entity.
+const radarPulse = {};
+
+function drawGround() {
+  // Match single-player: ground at GAME_H-50, dark green chassis with brighter
+  // edge line. Was incorrectly drawn at GAME_H-60 with blue tint in v1.
+  const gy = GAME_H - 50;
+  ctx.fillStyle = '#0d1a0d';
+  ctx.fillRect(0, gy, GAME_W, 50);
+  ctx.strokeStyle = '#1a3a1a';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, gy);
+  ctx.lineTo(GAME_W, gy);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+}
+
+function drawRadar(r) {
+  // Green pulse radar — ported from index.html L1236-L1266. Range circle + an
+  // expanding pulse ring + center dish + cross. Per-radar pulse phase so
+  // multiple radars don't all pulse in lockstep.
+  const phase = (radarPulse[r.idx] = (radarPulse[r.idx] || 0) + 0.02);
+  // Detection range circle
+  ctx.beginPath();
+  ctx.arc(r.pos.x, r.pos.y, r.radius, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(0, 200, 100, 0.15)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  // Sweep pulse
+  const pulseR = (phase % (Math.PI * 2)) / (Math.PI * 2) * r.radius;
+  ctx.beginPath();
+  ctx.arc(r.pos.x, r.pos.y, pulseR, 0, Math.PI * 2);
+  ctx.strokeStyle = `rgba(0, 255, 120, ${0.3 * (1 - pulseR / r.radius)})`;
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  // Center dish
+  ctx.beginPath();
+  ctx.arc(r.pos.x, r.pos.y, 8, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0, 200, 100, 0.4)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0, 255, 120, 0.7)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  // Cross
+  ctx.beginPath();
+  ctx.moveTo(r.pos.x - 5, r.pos.y); ctx.lineTo(r.pos.x + 5, r.pos.y);
+  ctx.moveTo(r.pos.x, r.pos.y - 5); ctx.lineTo(r.pos.x, r.pos.y + 5);
+  ctx.strokeStyle = 'rgba(0, 255, 120, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+function drawSweepRadar() {
+  // Ported verbatim from index.html L1268-L1299. Gradient-filled cone + bright
+  // leading edge + origin pip at SWEEP_X / SWEEP_Y.
+  const startAngle = sweepAngle - SWEEP_WIDTH / 2;
+  const endAngle = sweepAngle + SWEEP_WIDTH / 2;
+  const grad = ctx.createRadialGradient(SWEEP_X, SWEEP_Y, 0, SWEEP_X, SWEEP_Y, SWEEP_RANGE);
+  grad.addColorStop(0, 'rgba(0, 255, 100, 0.08)');
+  grad.addColorStop(0.6, 'rgba(0, 255, 100, 0.03)');
+  grad.addColorStop(1, 'rgba(0, 255, 100, 0)');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(SWEEP_X, SWEEP_Y);
+  ctx.arc(SWEEP_X, SWEEP_Y, SWEEP_RANGE, startAngle, endAngle);
+  ctx.closePath();
+  ctx.fill();
+  // Leading edge
+  ctx.strokeStyle = 'rgba(0, 255, 120, 0.25)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(SWEEP_X, SWEEP_Y);
+  ctx.lineTo(SWEEP_X + Math.cos(endAngle) * SWEEP_RANGE, SWEEP_Y + Math.sin(endAngle) * SWEEP_RANGE);
+  ctx.stroke();
+  // Origin pip
+  ctx.beginPath();
+  ctx.arc(SWEEP_X, SWEEP_Y, 5, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0, 200, 100, 0.5)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0, 255, 120, 0.7)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+function drawShahedShape(x, y, angle, alpha) {
+  // Delta-wing silhouette — ported verbatim from index.html L1053-L1097.
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = '#555';
+  ctx.strokeStyle = alpha > 0.5 ? '#999' : '#444';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, -18);
+  ctx.lineTo(3, -10); ctx.lineTo(22, 6); ctx.lineTo(20, 8); ctx.lineTo(5, 4);
+  ctx.lineTo(4, 14); ctx.lineTo(10, 18); ctx.lineTo(8, 19); ctx.lineTo(3, 15);
+  ctx.lineTo(-3, 15); ctx.lineTo(-8, 19); ctx.lineTo(-10, 18); ctx.lineTo(-4, 14);
+  ctx.lineTo(-5, 4); ctx.lineTo(-20, 8); ctx.lineTo(-22, 6); ctx.lineTo(-3, -10);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  if (alpha > 0.3) {
+    ctx.fillStyle = `rgba(255, 120, 40, ${alpha * 0.5})`;
+    ctx.beginPath();
+    ctx.arc(0, 16, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function drawCruiseShape(x, y, angle, alpha) {
+  // Long narrow fuselage + stubby wings — ported verbatim from index.html L1099-L1149.
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = '#774';
+  ctx.strokeStyle = alpha > 0.5 ? '#bb8' : '#554';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, -22);
+  ctx.lineTo(2, -16); ctx.lineTo(3, -8); ctx.lineTo(14, 2); ctx.lineTo(12, 4);
+  ctx.lineTo(3, 1); ctx.lineTo(3, 10); ctx.lineTo(8, 14); ctx.lineTo(7, 15);
+  ctx.lineTo(3, 12); ctx.lineTo(-3, 12); ctx.lineTo(-7, 15); ctx.lineTo(-8, 14);
+  ctx.lineTo(-3, 10); ctx.lineTo(-3, 1); ctx.lineTo(-12, 4); ctx.lineTo(-14, 2);
+  ctx.lineTo(-3, -8); ctx.lineTo(-2, -16);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  if (alpha > 0.3) {
+    ctx.fillStyle = `rgba(255, 200, 60, ${alpha * 0.7})`;
+    ctx.beginPath();
+    ctx.arc(0, 14, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = `rgba(255, 100, 20, ${alpha * 0.4})`;
+    ctx.beginPath();
+    ctx.arc(0, 18, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+// Test whether a world-space (x,y) is inside the current sweep-radar cone.
+// Used to render the dynamic-radar detection on the client side: the server
+// only computes per-shahed `visible` from STATIONARY radars (the sweep is a
+// pure client animation, so making it also drive server visibility would
+// require synchronizing the angle), so the client adds the sweep boost at
+// render time. Matches solo's index.html L1036-L1042.
+function inSweepCone(x, y) {
+  const sdx = x - SWEEP_X;
+  const sdy = y - SWEEP_Y;
+  const targetAngle = Math.atan2(sdy, sdx);
+  let diff = targetAngle - sweepAngle;
+  while (diff >  Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  return Math.abs(diff) < SWEEP_WIDTH / 2;
+}
+
+// shahedHeading — canvas rotation that puts a shahed's nose on its direction
+// of travel. Both silhouettes (drawShahedShape / drawCruiseShape) are drawn
+// nose-UP (the nose vertex is at y=-18 / y=-22), and shaheds fly DOWN the
+// screen (vel.y > 0), so the raw atan2 leaves every drone pointing backwards
+// — the half-turn is the whole fix. This is the THIRD time the drones have
+// been rendered tail-first in this code base (solo carries the same +PI at
+// its `s.angle` line); keep the expression in one place and keep
+// TestShahedNoseFacesTravel (main package) pointing at it.
+function shahedHeading(vx, vy) { return Math.atan2(vx, vy) + Math.PI; }
+
+function drawShahed(s) {
+  // Bug fix: dead shaheds inside a stationary radar's range were rendering
+  // because we faded on `visible` only. Match solo (index.html L2494) and
+  // skip the entire entity when alive=false; the user only sees its history
+  // via the WAVE_END freeze-frame UX after clicking the kill marker.
+  if (!s.alive) return;
+  // Visibility-driven fade; orient by velocity.
+  let alpha = Math.max(0.04, Math.min(1, s.visible || 0));
+  // Sweep-cone contribution — only during COMBAT, matching solo's gate.
+  if (MP.snapCurr && MP.snapCurr.phase === 'COMBAT' && inSweepCone(s.pos.x, s.pos.y)) {
+    alpha = Math.max(alpha, 0.9);
+  }
+  if (alpha < 0.05) return;
+  const vx = (s.vel && s.vel.x) || 0;
+  const vy = (s.vel && s.vel.y) || 1;
+  const angle = shahedHeading(vx, vy); // nose on the direction of travel (vy > 0 = down)
+  if (s.cruise) drawCruiseShape(s.pos.x, s.pos.y, angle, alpha);
+  else          drawShahedShape(s.pos.x, s.pos.y, angle, alpha);
+  // Faint blip when barely tracked
+  if (alpha < 0.2 && alpha > 0.05) {
+    ctx.fillStyle = `rgba(255, 80, 40, ${0.15 + Math.sin(Date.now() * 0.01) * 0.05})`;
+    ctx.fillRect(s.pos.x - 1, s.pos.y - 1, 2, 2);
+  }
+}
+
+function drawInterceptor(i) {
+  // Ported from index.html L1151-L1234 with one MP-justified divergence:
+  // when unarmed + not the firing player's, body color uses the owner's
+  // roster color instead of the green/dim-green pair, so it's obvious whose
+  // interceptor is whose. Armed (yellow) and autopilot (orange) palettes win
+  // over owner color — those modes carry information the player needs at a
+  // glance regardless of who fired.
+  if (!i.alive) return;
+  const isMine = i.owner_player_id === MP.playerId;
+  const ownerCol = MP.ownerColor(i.owner_player_id);
+
+  // Proximity rings for armed interceptors (matches single-player palette).
+  if (i.armed) {
+    ctx.beginPath();
+    ctx.arc(i.pos.x, i.pos.y, 147, 0, Math.PI * 2);
+    ctx.strokeStyle = i.auto_pilot
+      ? (isMine ? 'rgba(255, 100, 0, 0.12)' : 'rgba(255, 100, 0, 0.06)')
+      : (isMine ? 'rgba(255, 200, 50, 0.12)' : 'rgba(255, 200, 50, 0.06)');
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(i.pos.x, i.pos.y, 147 / 4, 0, Math.PI * 2);
+    ctx.strokeStyle = i.auto_pilot
+      ? (isMine ? 'rgba(255, 100, 0, 0.25)' : 'rgba(255, 100, 0, 0.12)')
+      : (isMine ? 'rgba(255, 200, 50, 0.25)' : 'rgba(255, 200, 50, 0.12)');
+    ctx.lineWidth = 1;
+    ctx.stroke();
+  }
+  // Autopilot detection ring
+  if (i.auto_pilot) {
+    ctx.beginPath();
+    ctx.arc(i.pos.x, i.pos.y, 294, 0, Math.PI * 2);
+    ctx.strokeStyle = isMine ? 'rgba(255, 100, 0, 0.12)' : 'rgba(255, 100, 0, 0.06)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([8, 6]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.save();
+  ctx.translate(i.pos.x, i.pos.y);
+  const vx = (i.vel && i.vel.x) || 0;
+  const vy = (i.vel && i.vel.y) || -1;
+  ctx.rotate(Math.atan2(vx, -vy));
+  // Body coloring: armed/auto win over owner color (mode information). For
+  // unarmed, mine = bright green (matches solo's active interceptor), others
+  // = their roster color (the necessary MP divergence).
+  let body, edge;
+  if (i.auto_pilot)  { body = isMine ? '#ff6600' : '#aa4400'; edge = isMine ? '#ff8833' : '#cc5500'; }
+  else if (i.armed)  { body = isMine ? '#ffcc00' : '#aa8800'; edge = isMine ? '#ffee66' : '#ccaa33'; }
+  else if (isMine)   { body = '#00ffaa';                       edge = '#aaffdd'; }
+  else               { body = ownerCol;                        edge = ownerCol; }
+  ctx.fillStyle = body;
+  ctx.strokeStyle = edge;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, -12);
+  ctx.lineTo(3, -4); ctx.lineTo(3, 6); ctx.lineTo(6, 10); ctx.lineTo(3, 8);
+  ctx.lineTo(3, 10); ctx.lineTo(-3, 10); ctx.lineTo(-3, 8); ctx.lineTo(-6, 10);
+  ctx.lineTo(-3, 6); ctx.lineTo(-3, -4);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  // Exhaust
+  ctx.fillStyle = `rgba(255, ${150 + Math.random() * 100}, 30, 0.8)`;
+  ctx.beginPath();
+  ctx.moveTo(-2, 10);
+  ctx.lineTo(0, 14 + Math.random() * 6);
+  ctx.lineTo(2, 10);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+  // Trail from server-provided path[]
+  if (i.path && i.path.length > 1) {
+    ctx.beginPath();
+    ctx.moveTo(i.path[0].x, i.path[0].y);
+    for (let k = 1; k < i.path.length; k++) ctx.lineTo(i.path[k].x, i.path[k].y);
+    ctx.strokeStyle = isMine ? 'rgba(0,255,170, 0.15)' : `${ownerCol}33`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+}
+
+function drawLauncher(L) {
+  // Ported from index.html L1322-L1349 launcher draw: 50x10 chassis at ground
+  // level, indicator triangle above, optional number label. MP divergence:
+  // chassis colors derived from owner so each player's launcher is identifiable.
+  // The active/inactive distinction from solo (where the player flips between
+  // their 2 launchers) doesn't apply in MP — each player has exactly one
+  // launcher, so "mine" replaces "active".
+  const mine = L.owner_player_id === MP.playerId;
+  const ownerCol = MP.ownerColor(L.owner_player_id);
+  const gy = GAME_H - 50;
+  const padColor = mine ? '#2a4a2a' : '#152015';
+  const borderColor = mine ? ownerCol : `${ownerCol}66`;
+  // Pad base
+  ctx.fillStyle = padColor;
+  ctx.fillRect(L.x - 25, gy, 50, 10);
+  ctx.strokeStyle = borderColor;
+  ctx.lineWidth = mine ? 2 : 1;
+  ctx.strokeRect(L.x - 25, gy, 50, 10);
+  // Indicator triangle
+  ctx.fillStyle = borderColor;
+  ctx.beginPath();
+  ctx.moveTo(L.x, gy - 5);
+  ctx.lineTo(L.x - 5, gy);
+  ctx.lineTo(L.x + 5, gy);
+  ctx.closePath();
+  ctx.fill();
+  ctx.lineWidth = 1;
+  // YOU label above own launcher
+  if (mine) {
+    ctx.fillStyle = ownerCol;
+    ctx.font = 'bold 10px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('YOU', L.x, gy - 12);
+    ctx.textAlign = 'left';
+  }
+  // Per-launcher progress bars (arming + resupplying) drawn above the pad
+  // when active, so the player has feedback that their input registered.
+  if (L.arming) {
+    const pct = Math.max(0, Math.min(1, (L.arm_timer || 0) / 30));
+    ctx.fillStyle = '#ffcc00';
+    ctx.fillRect(L.x - 25, gy - 4, 50 * pct, 2);
+  }
+  if (L.resupplying) {
+    const pct = Math.max(0, Math.min(1, (L.resupply_timer || 0) / 60));
+    ctx.fillStyle = '#00aaff';
+    ctx.fillRect(L.x - 25, gy - 4, 50 * pct, 2);
+  }
+}
+
+function drawExplosion(e) {
+  ctx.fillStyle = e.color || '#ff8800';
+  ctx.globalAlpha = Math.max(0, 1 - (e.age || 0) / 30);
+  ctx.beginPath();
+  ctx.arc(e.x, e.y, 6 + (e.age || 0) * 0.5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
+function drawBlastWave(b) {
+  ctx.strokeStyle = '#ffcc88';
+  ctx.lineWidth = 2;
+  ctx.globalAlpha = Math.max(0, 1 - b.radius / (b.max_radius || 147));
+  ctx.beginPath();
+  ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = 1;
+}
+
+// ─── Camels + spits — only meaningful in the relief wave. The snapshot
+// emits empty arrays otherwise so the iteration is harmless. Visual is a
+// stylized sandy hump on legs walking the ground line, matching solo's
+// drawCamel (index.html L1700-ish).
+function drawCamel(c) {
+  if (!c.alive) return;
+  const x = c.pos.x, y = c.pos.y;
+  ctx.save();
+  ctx.translate(x, y);
+  if (c.dir < 0) ctx.scale(-1, 1);
+  // Body
+  ctx.fillStyle = '#c9a26b';
+  ctx.beginPath();
+  ctx.ellipse(0, -8, 14, 7, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Hump
+  ctx.beginPath();
+  ctx.ellipse(-3, -15, 7, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // Neck + head
+  ctx.beginPath();
+  ctx.moveTo(8, -12);
+  ctx.lineTo(14, -22);
+  ctx.lineTo(18, -22);
+  ctx.lineTo(20, -16);
+  ctx.lineTo(12, -10);
+  ctx.closePath();
+  ctx.fill();
+  // Legs — animate via walking flag (server-side)
+  ctx.strokeStyle = '#a07a4a';
+  ctx.lineWidth = 2;
+  const phase = c.walking ? Math.sin(Date.now() * 0.012 + x * 0.1) * 2 : 0;
+  for (let li = 0; li < 4; li++) {
+    const lx = -8 + li * 6;
+    const ly = li % 2 === 0 ? phase : -phase;
+    ctx.beginPath();
+    ctx.moveTo(lx, -2);
+    ctx.lineTo(lx + ly, 6);
+    ctx.stroke();
+  }
+  ctx.lineWidth = 1;
+  ctx.restore();
+}
+
+function drawCamelSpit(p) {
+  if (!p.alive) return;
+  // Bright wet glob with a fading tail.
+  ctx.fillStyle = 'rgba(180, 220, 255, 0.9)';
+  ctx.beginPath();
+  ctx.arc(p.pos.x, p.pos.y, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(180, 220, 255, 0.25)';
+  ctx.beginPath();
+  ctx.arc(p.pos.x - (p.vel ? p.vel.x : 0), p.pos.y - (p.vel ? p.vel.y : 0), 2, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// ─── Bunker overlay — wave-specific TBM warning + RUN button + post-fade.
+// Driven entirely by state.tick.bunker (null when phase=="idle"). Single-player
+// uses the same phase machine; only the colors + button placement port over.
+const BTN_RUN = { x: GAME_W / 2 - 90, y: GAME_H / 2 - 40, w: 180, h: 70 };
+function drawBunkerOverlay(bunker) {
+  if (!bunker) return;
+  const phase = bunker.phase;
+  if (phase === 'active') {
+    const secsLeft = Math.max(0, Math.ceil((bunker.timer || 0) / 30));
+    // Pulsing red overlay
+    const pulse = Math.sin(Date.now() * 0.01) * 0.1 + 0.2;
+    ctx.fillStyle = `rgba(120, 20, 20, ${pulse})`;
+    ctx.fillRect(0, 0, GAME_W, GAME_H);
+    // Warning banner
+    ctx.fillStyle = '#ff4422';
+    ctx.font = 'bold 28px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('⚠  TBM INBOUND  ⚠', GAME_W / 2, 160);
+    ctx.font = 'bold 64px "Courier New", monospace';
+    ctx.fillText(`${secsLeft}`, GAME_W / 2, 240);
+    ctx.font = '16px "Courier New", monospace';
+    ctx.fillStyle = '#ffaa66';
+    ctx.fillText('GET TO THE BUNKER', GAME_W / 2, 270);
+    // RUN button — only meaningful if our player hasn't pressed it yet
+    if (!bunker.run_timer || bunker.run_timer === 0) {
+      ctx.fillStyle = '#1a0a0a';
+      ctx.fillRect(BTN_RUN.x, BTN_RUN.y, BTN_RUN.w, BTN_RUN.h);
+      ctx.strokeStyle = '#ff4422';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(BTN_RUN.x, BTN_RUN.y, BTN_RUN.w, BTN_RUN.h);
+      ctx.lineWidth = 1;
+      ctx.fillStyle = '#ff8866';
+      ctx.font = 'bold 28px "Courier New", monospace';
+      ctx.fillText(isTouchDevice ? 'RUN!' : 'RUN! (B)', GAME_W / 2, BTN_RUN.y + 45);
+    } else {
+      ctx.fillStyle = '#88ff88';
+      ctx.font = 'bold 18px "Courier New", monospace';
+      ctx.fillText('✓ RUNNING', GAME_W / 2, 340);
+    }
+    ctx.textAlign = 'left';
+  } else if (phase === 'post') {
+    const outcome = bunker.outcome || 'pending';
+    const fadePct = 1 - Math.min(1, (bunker.timer || 0) / 45);
+    ctx.fillStyle = outcome === 'safe' ? `rgba(0, 80, 40, ${0.4 * (1 - fadePct)})` : `rgba(120, 20, 20, ${0.4 * (1 - fadePct)})`;
+    ctx.fillRect(0, 0, GAME_W, GAME_H);
+    ctx.fillStyle = outcome === 'safe' ? '#88ff88' : '#ff4422';
+    ctx.font = 'bold 32px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(outcome === 'safe' ? '✓ SAFE' : '✗ HIT', GAME_W / 2, 220);
+    ctx.textAlign = 'left';
+  }
+}
+
+// ─── End-of-wave trajectory review — port of index.html drawTrajectories
+// (L1548-L1614). Renders during WAVE_END / GAME_OVER from wave.summary:
+//   shaheds[]      green = intercepted, red = impact, retreated skipped
+//   interceptors[] blue  = hit,         gray = miss
+// Each shahed path ends in a colored dot (matches solo's end-marker dot at
+// L1564). Kill markers + freeze-frame UX layer on top of the trajectories.
+function drawAllTrajectories(summary) {
+  // Shahed paths
+  const shaheds = summary.shaheds || [];
+  for (const t of shaheds) {
+    if (!t.path || t.path.length < 2) continue;
+    if (t.outcome === 'retreated') continue; // solo doesn't render retreated paths
+    ctx.beginPath();
+    ctx.moveTo(t.path[0].x, t.path[0].y);
+    for (let i = 1; i < t.path.length; i++) ctx.lineTo(t.path[i].x, t.path[i].y);
+    ctx.strokeStyle = t.outcome === 'intercepted'
+      ? 'rgba(0, 200, 100, 0.5)'   // green = intercepted
+      : 'rgba(255, 60, 30, 0.6)';  // red = impact
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    const end = t.path[t.path.length - 1];
+    ctx.fillStyle = t.outcome === 'intercepted' ? '#00cc66' : '#ff3322';
+    ctx.beginPath();
+    ctx.arc(end.x, end.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // Interceptor paths
+  const ints = summary.interceptors || [];
+  for (const t of ints) {
+    if (!t.path || t.path.length < 2) continue;
+    ctx.beginPath();
+    ctx.moveTo(t.path[0].x, t.path[0].y);
+    for (let i = 1; i < t.path.length; i++) ctx.lineTo(t.path[i].x, t.path[i].y);
+    ctx.strokeStyle = t.outcome === 'hit'
+      ? 'rgba(0, 180, 255, 0.5)'    // blue = hit
+      : 'rgba(100, 100, 100, 0.3)'; // grey = miss
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  // Legend (matches solo L1605-L1612)
+  ctx.textAlign = 'left';
+  ctx.font = '11px "Courier New", monospace';
+  ctx.fillStyle = '#00cc66'; ctx.fillText('── intercepted', 15, GAME_H - 30);
+  ctx.fillStyle = '#ff3322'; ctx.fillText('── impact',      130, GAME_H - 30);
+  ctx.fillStyle = '#00b4ff'; ctx.fillText('── hit',         220, GAME_H - 30);
+  ctx.fillStyle = '#666';    ctx.fillText('── miss',        280, GAME_H - 30);
+  const kills = summary.kills || [];
+  if (kills.length > 0 && (MP.selectedKill === null || MP.selectedKill === undefined)) {
+    ctx.fillStyle = '#00aa66';
+    ctx.fillText(isTouchDevice ? 'tap kill markers for freeze frame' : 'click kill markers for freeze frame', 350, GAME_H - 30);
+  }
+}
+
+function drawKillMarkers(kills) {
+  const pulse = Math.sin(Date.now() * 0.005) * 0.3 + 0.7;
+  for (let ki = 0; ki < kills.length; ki++) {
+    const k = kills[ki];
+    const selected = MP.selectedKill === ki;
+    ctx.beginPath();
+    ctx.arc(k.kill_pos.x, k.kill_pos.y, selected ? 12 : 8, 0, Math.PI * 2);
+    ctx.strokeStyle = selected ? 'rgba(0, 255, 180, 0.9)' : `rgba(0, 255, 120, ${pulse * 0.6})`;
+    ctx.lineWidth = selected ? 2.5 : 1.5;
+    ctx.stroke();
+  }
+}
+
+function drawKillFreezeFrame(k) {
+  // Dim overlay + highlight the selected kill's trajectory + blast radius +
+  // ALL other shaheds' positions at the kill instant (sourced from
+  // wave.summary.kills[].world_shaheds, server-captured at the kill tick).
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.fillRect(0, 0, GAME_W, GAME_H);
+  // Other shaheds at the moment of kill — render in their actual shape +
+  // highlight any that were inside the blast radius (about to die from the
+  // same explosion as the marker kill).
+  if (k.world_shaheds) {
+    for (const w of k.world_shaheds) {
+      const angle = shahedHeading((w.vel && w.vel.x) || 0, (w.vel && w.vel.y) || 1);
+      if (w.cruise) drawCruiseShape(w.pos.x, w.pos.y, angle, 0.8);
+      else          drawShahedShape(w.pos.x, w.pos.y, angle, 0.8);
+      // Highlight if inside this kill's blast radius — those died in the same blast.
+      const inBlast = Math.hypot(w.pos.x - k.kill_pos.x, w.pos.y - k.kill_pos.y) < 147;
+      if (inBlast) {
+        ctx.beginPath();
+        ctx.arc(w.pos.x, w.pos.y, 18, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255, 60, 30, 0.9)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(255, 60, 30, 0.15)';
+        ctx.fill();
+        ctx.lineWidth = 1;
+      }
+    }
+  }
+  // Highlight this kill's path bright (drawn over the dimmed shaheds)
+  if (k.path && k.path.length > 1) {
+    ctx.beginPath();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = '#00ffaa';
+    ctx.moveTo(k.path[0].x, k.path[0].y);
+    for (let i = 1; i < k.path.length; i++) ctx.lineTo(k.path[i].x, k.path[i].y);
+    ctx.lineTo(k.kill_pos.x, k.kill_pos.y);
+    ctx.stroke();
+    ctx.lineWidth = 1;
+  }
+  // Blast radius (147 = PROX_RADIUS from solo)
+  ctx.beginPath();
+  ctx.arc(k.kill_pos.x, k.kill_pos.y, 147, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(0, 255, 120, 0.4)';
+  ctx.lineWidth = 1.5;
+  ctx.setLineDash([6, 4]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(0, 255, 120, 0.06)';
+  ctx.fill();
+  // Trigger radius (37 = PROX_TRIGGER)
+  ctx.beginPath();
+  ctx.arc(k.kill_pos.x, k.kill_pos.y, 37, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255, 200, 50, 0.5)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  // Marker
+  ctx.beginPath();
+  ctx.arc(k.kill_pos.x, k.kill_pos.y, 14, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(0, 255, 180, 0.95)';
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+  ctx.lineWidth = 1;
+  // Info panel — bottom-left, attributed to the killing player in their color
+  const ownerCol = MP.ownerColor(k.player_id);
+  const owner = MP.rosterEntry(k.player_id);
+  const ownerName = (owner && owner.name) || `P${k.player_id}`;
+  const panelX = 15, panelY = GAME_H - 110, panelW = 290, panelH = 80;
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+  ctx.fillRect(panelX, panelY, panelW, panelH);
+  ctx.strokeStyle = ownerCol;
+  ctx.strokeRect(panelX, panelY, panelW, panelH);
+  ctx.fillStyle = ownerCol;
+  ctx.font = 'bold 14px "Courier New", monospace';
+  ctx.fillText(`KILLED BY ${ownerName.toUpperCase()}`, panelX + 10, panelY + 22);
+  ctx.fillStyle = '#ccc';
+  ctx.font = '12px "Courier New", monospace';
+  ctx.fillText(`position  ( ${Math.round(k.kill_pos.x)} , ${Math.round(k.kill_pos.y)} )`, panelX + 10, panelY + 42);
+  ctx.fillText(`tick      ${k.tick}`, panelX + 10, panelY + 58);
+  ctx.fillStyle = '#888';
+  ctx.font = '11px "Courier New", monospace';
+  ctx.fillText(isTouchDevice ? 'tap elsewhere or ESC to close' : 'click elsewhere or ESC to close', panelX + 10, panelY + 74);
+}
+
+// Hit-test for kill markers. Returns index of clicked kill or -1.
+function killMarkerIndexAt(pt) {
+  if (!MP.lastWaveSummary || !MP.lastWaveSummary.kills) return -1;
+  for (let ki = 0; ki < MP.lastWaveSummary.kills.length; ki++) {
+    const k = MP.lastWaveSummary.kills[ki];
+    if (Math.hypot(pt.x - k.kill_pos.x, pt.y - k.kill_pos.y) < 24) return ki;
+  }
+  return -1;
+}
+
+function drawRoster() {
+  // Panel sits BELOW the HUD's right column (LIVES y=25, INTERCEPTORS y=45, PHASE y=65)
+  // so the lives/health bar is never occluded. headerY=110 leaves 25px of breathing room
+  // under PHASE and matches the COMBAT mode-readout (y=85) without colliding.
+  // Width is 200px so 14-char names fit alongside the color chip.
+  const x = GAME_W - 215, headerY = 110;
+  const firstEntryY = headerY + 22;
+  const panelW = 200;
+  const panelH = Math.max(28, firstEntryY - headerY + 4 + MP.roster.length * 18);
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(x - 5, headerY - 14, panelW, panelH);
+  ctx.fillStyle = '#aaa';
+  ctx.font = 'bold 12px "Courier New", monospace';
+  ctx.fillText(`PLAYERS: ${MP.roster.filter(r => r.connected).length}/${MP.roster.length}`, x, headerY);
+  ctx.font = '12px "Courier New", monospace';
+  for (let k = 0; k < MP.roster.length; k++) {
+    const r = MP.roster[k];
+    const rowY = firstEntryY + k * 18;
+    ctx.fillStyle = r.color;
+    ctx.fillRect(x, rowY - 9, 10, 10);
+    ctx.fillStyle = r.connected ? '#ccc' : '#666';
+    ctx.fillText((r.player_id === MP.playerId ? '★ ' : '') + (r.name || '?'), x + 16, rowY);
+  }
+}
+
+function drawHUD() {
+  if (!MP.snapCurr) return;
+  const s = MP.snapCurr;
+  // Layout matches single-player (index.html L1353+): per-stat lines down the
+  // left, lives + intercepts down the right, mode below them. Each stat on its
+  // own row so the eye can scan top-down without re-reading a long single line.
+  const myL = MP.myLauncher();
+  const myInts = (s.interceptors || []).filter(i => i.alive && i.owner_player_id === MP.playerId);
+  const myAmmo = myL ? (myL.interceptors_left || 0) : 0;
+  const incoming = (s.shaheds || []).filter(sh => sh.alive).length;
+
+  ctx.fillStyle = '#00cc66';
+  ctx.font = '14px "Courier New", monospace';
+  ctx.textAlign = 'left';
+  // Left column: wave / score / incoming
+  ctx.fillText(`WAVE ${s.wave || 0}`, 15, 25);
+  ctx.fillText(`SCORE ${s.score || 0}`, 15, 45);
+  ctx.fillText(`INCOMING ${incoming}`, 15, 65);
+  // Right column: lives (block characters, matching solo) / your interceptors
+  ctx.textAlign = 'right';
+  const livesN = Math.max(0, s.lives || 0);
+  ctx.fillText(`LIVES ${'█'.repeat(livesN)}${'_'.repeat(Math.max(0, 5 - livesN))}`, GAME_W - 10, 25);
+  ctx.fillText(`YOUR INTERCEPTORS ${myInts.length} / ${myInts.length + myAmmo}`, GAME_W - 10, 45);
+  // Phase label small and unobtrusive below lives.
+  ctx.font = '11px "Courier New", monospace';
+  ctx.fillStyle = '#666';
+  ctx.fillText(s.phase || '?', GAME_W - 10, 65);
+  ctx.font = '14px "Courier New", monospace';
+  ctx.textAlign = 'left';
+  // Fire-mode readout for the player's own launcher. Always visible during COMBAT
+  // on both desktop AND touch (touch also gets the big button below). Without this
+  // readout the desktop player had no visible signal that Tab actually flipped the
+  // mode — single-player solves this at index.html L1375-L1379 in the same screen
+  // location, so we match.
+  if (s.phase === 'COMBAT') {
+    const myLForMode = MP.myLauncher();
+    if (myLForMode) {
+      const modeLabels = ['MODE: UNARMED [direct]', 'MODE: ARMED [proximity]', 'MODE: AUTOPILOT [seek]'];
+      const modeColors = ['#00cc66', '#ffcc00', '#ff6600'];
+      const m = myLForMode.fire_mode || 0;
+      ctx.fillStyle = modeColors[m];
+      ctx.font = '14px "Courier New", monospace';
+      ctx.fillText(modeLabels[m] + (isTouchDevice ? '' : '   (TAB to cycle)'), 15, 85);
+    }
+  }
+  // Combat HUD buttons — rendered ONLY on touch devices. Desktop uses Tab + R
+  // keybindings (matching single-player), so the buttons stay out of the play area.
+  if (s.phase === 'COMBAT' && isTouchDevice) {
+    const myL = MP.myLauncher();
+    // Fire mode button
+    ctx.fillStyle = '#1a1a2a';
+    ctx.fillRect(BTN_FIRE_MODE.x, BTN_FIRE_MODE.y, BTN_FIRE_MODE.w, BTN_FIRE_MODE.h);
+    ctx.strokeStyle = '#ffcc00';
+    ctx.strokeRect(BTN_FIRE_MODE.x, BTN_FIRE_MODE.y, BTN_FIRE_MODE.w, BTN_FIRE_MODE.h);
+    ctx.fillStyle = '#ffcc00';
+    ctx.font = 'bold 13px "Courier New", monospace';
+    const modeNames = ['MANUAL', 'ARMED', 'AUTOPILOT'];
+    const m = myL ? (myL.fire_mode || 0) : 0;
+    ctx.textAlign = 'center';
+    ctx.fillText(`▶ MODE: ${modeNames[m]}`, BTN_FIRE_MODE.x + BTN_FIRE_MODE.w / 2, BTN_FIRE_MODE.y + 26);
+    // Resupply button
+    ctx.fillStyle = '#1a1a2a';
+    ctx.fillRect(BTN_RESUPPLY.x, BTN_RESUPPLY.y, BTN_RESUPPLY.w, BTN_RESUPPLY.h);
+    ctx.strokeStyle = '#00aaff';
+    ctx.strokeRect(BTN_RESUPPLY.x, BTN_RESUPPLY.y, BTN_RESUPPLY.w, BTN_RESUPPLY.h);
+    ctx.fillStyle = '#00aaff';
+    ctx.fillText('RESUPPLY', BTN_RESUPPLY.x + BTN_RESUPPLY.w / 2, BTN_RESUPPLY.y + 26);
+    ctx.textAlign = 'left';
+  }
+  // Back button always
+  ctx.fillStyle = '#1a1a2a';
+  ctx.fillRect(BTN_BACK.x, BTN_BACK.y, BTN_BACK.w, BTN_BACK.h);
+  ctx.strokeStyle = '#888';
+  ctx.strokeRect(BTN_BACK.x, BTN_BACK.y, BTN_BACK.w, BTN_BACK.h);
+  ctx.fillStyle = '#ccc';
+  ctx.font = 'bold 12px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('← SOLO', BTN_BACK.x + BTN_BACK.w / 2, BTN_BACK.y + 21);
+  ctx.textAlign = 'left';
+}
+
+// drawHighScorePanel — renders the top 5 scores in a panel anchored at yTop.
+// Each entry is two lines: rank + team + score, then the per-player member list.
+// Long member lists are abbreviated with a "+N MORE" suffix so they always fit
+// on one row even when 8 players each have 14-char names.
+//
+// Width-budget math: at font 12px monospace, GAME_W=800 fits ~114 chars wide.
+// We reserve 660 px for the panel (cx-330 to cx+330) → ~94 chars. Subtracting
+// the visual prefix ("    "), 8 names × 14 chars + 7 separators = 119 chars
+// would overflow, so we abbreviate names to 8 chars and cap the list at the
+// width budget with a "+N MORE" tail.
+function drawHighScorePanel(yTop) {
+  const cx = GAME_W / 2;
+  const top5 = (MP.highScores || []).slice(0, 5);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#ffcc66';
+  ctx.font = 'bold 14px "Courier New", monospace';
+  ctx.fillText('— HIGH SCORES (TOP 5) —', cx, yTop);
+  if (top5.length === 0) {
+    ctx.fillStyle = '#666';
+    ctx.font = '12px "Courier New", monospace';
+    ctx.fillText('(no scores yet — be the first)', cx, yTop + 24);
+    ctx.textAlign = 'left';
+    return;
+  }
+  ctx.textAlign = 'left';
+  const leftX = cx - 330;
+  const rowH = 32;
+  ctx.font = '13px "Courier New", monospace';
+  for (let i = 0; i < top5.length; i++) {
+    const s = top5[i];
+    const y = yTop + 24 + i * rowH;
+    // Line 1: rank · team-or-name · score · wave
+    const team = (s.team && s.team.trim()) ? s.team : (s.name || 'ANON');
+    const teamDisp = team.length > 24 ? team.slice(0, 24) : team;
+    ctx.fillStyle = i === 0 ? '#ffcc66' : '#ccc';
+    ctx.fillText('#' + (i + 1).toString().padStart(2, ' '), leftX, y);
+    ctx.fillStyle = i === 0 ? '#ffcc66' : '#ddd';
+    ctx.fillText(teamDisp, leftX + 32, y);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#88ddff';
+    ctx.fillText(`${s.score}`, cx + 260, y);
+    ctx.fillStyle = '#6688aa';
+    ctx.fillText(`W${s.wave}`, cx + 320, y);
+    ctx.textAlign = 'left';
+    // Line 2: per-player member list (abbreviated). Members are stored
+    // comma-joined; we render up to N entries that fit, then "+K MORE".
+    ctx.fillStyle = '#888';
+    ctx.font = '11px "Courier New", monospace';
+    const members = (s.members && s.members.length > 0) ? s.members.split(',') : [];
+    let line = '    ';
+    let used = 0;
+    const maxChars = 86; // visual budget for line 2
+    for (let k = 0; k < members.length; k++) {
+      // Abbreviate each member to 8 chars to keep things tidy alongside an
+      // 8-player roster. The full 14-char name still lives on the wire if
+      // the consumer wants it.
+      const nm = members[k].slice(0, 8);
+      const proposed = (used === 0 ? nm : (', ' + nm));
+      if (line.length + proposed.length + 12 > maxChars) {
+        const remaining = members.length - k;
+        if (remaining > 0) line += ` +${remaining} MORE`;
+        break;
+      }
+      line += proposed;
+      used++;
+    }
+    ctx.fillText(line, leftX, y + 14);
+    ctx.font = '13px "Courier New", monospace';
+  }
+  ctx.textAlign = 'left';
+}
+
+function drawPhaseOverlay() {
+  if (!MP.snapCurr) return;
+  const phase = MP.snapCurr.phase;
+  if (phase === 'TITLE') {
+    // Refresh high scores lazily — first render or after the throttle window.
+    fetchHighScores(false);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#00ff88';
+    ctx.font = 'bold 36px "Courier New", monospace';
+    ctx.fillText('AIR DEFENDERS — CO-OP', GAME_W / 2, 60);
+    ctx.font = '14px "Courier New", monospace';
+    ctx.fillStyle = '#44aaff';
+    ctx.fillText('Connected: ' + MP.roster.filter(r => r.connected).length + ' player(s) — PRESS SPACE (any player) to start', GAME_W / 2, 88);
+
+    drawHighScorePanel(110);
+
+    // EDIT NAME button — small, above the controls block. Persistent across
+    // SP + MP via localStorage; sends input.set_name so the roster updates
+    // immediately for everyone else in the room too.
+    {
+      const cur = (localStorage.getItem('airdefenders_name') || ssGet('mp_name') || '').toUpperCase();
+      const label = cur ? `EDIT NAME (${cur})` : 'EDIT NAME';
+      ctx.fillStyle = '#0a1a2a';
+      ctx.fillRect(BTN_EDIT_NAME.x, BTN_EDIT_NAME.y, BTN_EDIT_NAME.w, BTN_EDIT_NAME.h);
+      ctx.strokeStyle = '#44aaff';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(BTN_EDIT_NAME.x, BTN_EDIT_NAME.y, BTN_EDIT_NAME.w, BTN_EDIT_NAME.h);
+      ctx.fillStyle = '#88ccff';
+      ctx.font = 'bold 13px "Courier New", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(label, BTN_EDIT_NAME.x + BTN_EDIT_NAME.w / 2, BTN_EDIT_NAME.y + 22);
+      ctx.lineWidth = 1;
+    }
+
+    // Controls block — touch-aware. Desktop keyboard hints differ from on-screen
+    // touch hints (matches single-player's index.html L2385-L2401 branching).
+    const cx = GAME_W / 2 - 180;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#00aa66';
+    ctx.font = '13px "Courier New", monospace';
+    if (isTouchDevice) {
+      ctx.fillText('TAP BAR      launch from your station', cx, 470);
+      ctx.fillText('TOUCH+DRAG   steer your active interceptor', cx, 488);
+      ctx.fillStyle = '#00cc66';
+      ctx.fillText('HOLD ARROWS  move your launch station', cx, 506);
+      ctx.fillStyle = '#00aaff';
+      ctx.fillText('Buttons below: MOVE / MODE / RESUPPLY / FIRE / ADVANCE', cx, 524);
+      ctx.fillStyle = '#00aa66';
+      ctx.fillText('Edit your name above before the game starts', cx, 542);
+    } else {
+      ctx.fillText('SPACE        launch from your station', cx, 470);
+      ctx.fillText('←↑→↓        steer your active interceptor', cx, 488);
+      ctx.fillText('A / D        move your launcher', cx, 506);
+      ctx.fillText('TAB          cycle fire mode (your launcher)', cx, 524);
+      ctx.fillText('R            resupply your interceptors (2s)', cx, 542);
+    }
+    ctx.font = '11px "Courier New", monospace';
+    ctx.fillStyle = '#006633';
+    ctx.fillText('Unarmed = direct hit (instant) · Armed = proximity (1 s) · Autopilot = seek (2 s)', GAME_W / 2 - 250, 568);
+    // Fabric demo trigger — platform admins only, and never inside a bot frame
+    // (the /demo grid embeds eight of these; the button there would be noise).
+    if (!_botParam) drawDemoButton(BTN_DEMO);
+    ctx.textAlign = 'left';
+  }
+  if (phase === 'EMPLACEMENT') {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#00cc66';
+    ctx.font = 'bold 22px "Courier New", monospace';
+    ctx.fillText(`WAVE ${MP.snapCurr.wave || 0} — EMPLACEMENT`, GAME_W / 2, 40);
+    ctx.font = '14px "Courier New", monospace';
+    ctx.fillStyle = '#009944';
+    ctx.fillText('Drag radars to position them. SPACE when ready (any player).', GAME_W / 2, 70);
+    ctx.textAlign = 'left';
+  }
+  if (phase === 'WAVE_END') {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#00ff88';
+    ctx.font = 'bold 32px "Courier New", monospace';
+    ctx.fillText(`WAVE ${MP.snapCurr.wave || 0} COMPLETE`, GAME_W / 2, 220);
+    ctx.font = '16px "Courier New", monospace';
+    ctx.fillStyle = '#888';
+    ctx.fillText('PRESS SPACE for next wave (any player)', GAME_W / 2, 270);
+    ctx.textAlign = 'left';
+  }
+  if (phase === 'CELEBRATION') {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffcc00';
+    ctx.font = 'bold 36px "Courier New", monospace';
+    ctx.fillText('TOP FIVE!', GAME_W / 2, 200);
+    ctx.font = '20px "Courier New", monospace';
+    ctx.fillStyle = '#fff';
+    ctx.fillText(`SCORE: ${MP.snapCurr.score || 0}`, GAME_W / 2, 245);
+    ctx.textAlign = 'left';
+  }
+  if (phase === 'GAME_OVER') {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff4444';
+    ctx.font = 'bold 32px "Courier New", monospace';
+    ctx.fillText('AREA COMPROMISED', GAME_W / 2, 90);
+    ctx.font = '15px "Courier New", monospace';
+    ctx.fillStyle = '#888';
+    ctx.fillText(`FINAL SCORE: ${MP.snapCurr.score || 0}   WAVE: ${MP.snapCurr.wave || 0}`, GAME_W / 2, 118);
+    if (MP.lastGameOver && MP.lastGameOver.ranks) {
+      ctx.font = '13px "Courier New", monospace';
+      for (let k = 0; k < MP.lastGameOver.ranks.length; k++) {
+        const r = MP.lastGameOver.ranks[k];
+        ctx.fillStyle = MP.ownerColor(r.player_id);
+        ctx.fillText(`#${r.rank} ${r.name}   intercepts:${r.intercepts}  shots:${r.shots}`, GAME_W / 2, 180 + k * 20);
+      }
+    }
+    // Server auto-derives the team string from the contributor list and
+    // persists the row at game-over time — no user input required. The
+    // entry will show up on the TITLE leaderboard once SPACE returns home.
+    ctx.fillStyle = '#888';
+    ctx.font = '12px "Courier New", monospace';
+    ctx.fillText('Score saved to the multiplayer leaderboard.', GAME_W / 2, 360);
+    // Restart prompt — first SPACE returns to TITLE (home); second SPACE
+    // there starts a fresh round.
+    ctx.fillStyle = '#44aaff';
+    ctx.font = 'bold 14px "Courier New", monospace';
+    ctx.fillText('[ PRESS SPACE TO RETURN HOME ]', GAME_W / 2, BTN_BACK_FROM_OVER.y + 28);
+    ctx.textAlign = 'left';
+  }
+}
+
+function drawReconnectBanner() {
+  if (!MP.reconnecting && MP.snapCurr) return;
+  if (!MP.bannerMessage) return;
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  ctx.fillRect(GAME_W / 2 - 200, GAME_H / 2 - 30, 400, 60);
+  ctx.strokeStyle = '#ffcc00';
+  ctx.strokeRect(GAME_W / 2 - 200, GAME_H / 2 - 30, 400, 60);
+  ctx.fillStyle = '#ffcc00';
+  ctx.font = 'bold 16px "Courier New", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(MP.bannerMessage, GAME_W / 2, GAME_H / 2 + 6);
+  ctx.textAlign = 'left';
+}
+
+function render() {
+  // 60 fps poll + paint
+  pollHeldKeys();
+  if (BOT.active) BOT.tick();
+  // Advance the sweep-radar angle each frame (matches single-player's 60 fps loop).
+  sweepAngle = (sweepAngle + SWEEP_RATE) % (Math.PI * 2);
+  ctx.clearRect(0, 0, GAME_W, GAME_H);
+  ctx.fillStyle = '#060612';
+  ctx.fillRect(0, 0, GAME_W, GAME_H);
+  drawStars();
+  drawGround();
+  if (MP.snapCurr) {
+    const s = MP.snapCurr;
+    if (s.radars) for (const r of s.radars) drawRadar(r);
+    // Sweep radar visible during COMBAT / WAVE_END / GAME_OVER (matches solo).
+    if (s.phase === 'COMBAT' || s.phase === 'WAVE_END' || s.phase === 'GAME_OVER') {
+      drawSweepRadar();
+    }
+    if (s.blast_waves) for (const b of s.blast_waves) drawBlastWave(b);
+    if (s.shaheds) for (const sh of s.shaheds) {
+      const pos = MP.interpPos('shaheds', sh.eid) || sh.pos;
+      drawShahed({ ...sh, pos });
+    }
+    if (s.interceptors) for (const it of s.interceptors) {
+      const pos = MP.interpPos('interceptors', it.eid) || it.pos;
+      drawInterceptor({ ...it, pos });
+    }
+    if (s.launchers) for (const L of s.launchers) drawLauncher(L);
+    if (s.camels) for (const c of s.camels) drawCamel(c);
+    if (s.camel_spits) for (const sp of s.camel_spits) drawCamelSpit(sp);
+    if (s.explosions) for (const e of s.explosions) drawExplosion(e);
+    // Trajectory review + kill markers at WAVE_END / GAME_OVER, from the cached
+    // wave.summary frame. drawAllTrajectories renders every shahed (green/red)
+    // and every interceptor (blue/gray) path; drawKillMarkers layers the
+    // clickable green-pulse circles on top; a selected kill gets the
+    // dim-everything-else freeze-frame overlay.
+    if ((s.phase === 'WAVE_END' || s.phase === 'GAME_OVER') && MP.lastWaveSummary) {
+      drawAllTrajectories(MP.lastWaveSummary);
+      if (MP.lastWaveSummary.kills) drawKillMarkers(MP.lastWaveSummary.kills);
+      if (MP.selectedKill !== null && MP.selectedKill !== undefined && MP.lastWaveSummary.kills && MP.lastWaveSummary.kills[MP.selectedKill]) {
+        drawKillFreezeFrame(MP.lastWaveSummary.kills[MP.selectedKill]);
+      }
+    }
+    drawBunkerOverlay(s.bunker);
+    drawPhaseOverlay();
+    drawHUD();
+    drawRoster();
+  } else {
+    ctx.fillStyle = '#888';
+    ctx.font = '18px "Courier New", monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('CONNECTING TO SERVER…', GAME_W / 2, GAME_H / 2);
+    ctx.textAlign = 'left';
+  }
+  drawReconnectBanner();
+  requestAnimationFrame(render);
+}
+
+// ─── HTML touchControls wiring ──────────────────────────────────────────
+// Hold-to-move arrow buttons proxy to heldKeys('KeyA'/'KeyD'), which the
+// existing pollHeldKeys() converts into input.launcher_move at 30/sec —
+// matches the server's per-player rate cap exactly. No throttling math,
+// no slider feedback loop, same feel as keyboard A/D. Fire / mode / resupply
+// / advance buttons are click-only.
+const btnLeft  = document.getElementById('btnLeft');
+const btnRight = document.getElementById('btnRight');
+const btnMode  = document.getElementById('btnMode');
+const btnSup   = document.getElementById('btnSup');
+const btnFire  = document.getElementById('btnFire');
+const btnAdv   = document.getElementById('btnAdv');
+
+// bindHoldButton — wire pointerdown/up/cancel/leave so the button "press"
+// state corresponds exactly to whether the user's finger is on it. Adds the
+// .held class for visual feedback. Pointer events cover mouse + touch in a
+// single code path on every modern browser.
+function bindHoldButton(btn, code) {
+  const press = (e) => {
+    e.preventDefault();
+    heldKeys.add(code);
+    btn.classList.add('held');
+    if (e.pointerId !== undefined && btn.setPointerCapture) {
+      try { btn.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    }
+  };
+  const release = () => {
+    heldKeys.delete(code);
+    btn.classList.remove('held');
+  };
+  btn.addEventListener('pointerdown', press);
+  btn.addEventListener('pointerup', release);
+  btn.addEventListener('pointercancel', release);
+  btn.addEventListener('pointerleave', release);
+  btn.addEventListener('contextmenu', e => e.preventDefault());
+}
+bindHoldButton(btnLeft,  'KeyA');
+bindHoldButton(btnRight, 'KeyD');
+
+btnMode.addEventListener('click', () => {
+  const myL = MP.myLauncher();
+  if (!myL) return;
+  const next = ((myL.fire_mode || 0) + 1) % 3;
+  MP.send('input.fire_mode', { launcher_idx: myL.idx, mode: next });
+});
+btnSup.addEventListener('click', () => {
+  const myL = MP.myLauncher();
+  if (!myL) return;
+  MP.send('input.resupply', { launcher_idx: myL.idx });
+});
+btnFire.addEventListener('click', () => {
+  if (!MP.snapCurr) return;
+  if (MP.snapCurr.phase !== 'COMBAT') return;
+  const myL = MP.myLauncher();
+  if (!myL) return;
+  MP.send('input.fire', { launcher_idx: myL.idx });
+});
+btnAdv.addEventListener('click', () => {
+  if (!MP.snapCurr) return;
+  // Same logic SPACE uses on a desktop keyboard.
+  const phase = MP.snapCurr.phase;
+  if (phase === 'TITLE' || phase === 'EMPLACEMENT' || phase === 'WAVE_END' || phase === 'GAME_OVER') {
+    MP.send('input.state_advance', {});
+  }
+});
+
+// updateTouchControls — called once per render frame to keep button labels
+// and enable/disable state aligned with the game phase.
+function updateTouchControls() {
+  if (!isTouchDevice) return;
+  if (!MP.snapCurr) {
+    btnAdv.textContent = 'CONNECTING…';
+    btnAdv.disabled = true;
+    btnFire.disabled = true;
+    btnMode.disabled = true;
+    btnSup.disabled = true;
+    btnLeft.disabled = true;
+    btnRight.disabled = true;
+    return;
+  }
+  const phase = MP.snapCurr.phase;
+  const myL = MP.myLauncher();
+  btnFire.disabled = !(phase === 'COMBAT' && !!myL);
+  btnMode.disabled = !(phase === 'COMBAT' && !!myL);
+  btnSup.disabled  = !(phase === 'COMBAT' && !!myL);
+  // Movement buttons usable when we own a launcher; the server validates
+  // ownership and rate-limits, but client-side we mirror that for the visual.
+  const canMove = !!myL && (phase === 'COMBAT' || phase === 'EMPLACEMENT');
+  btnLeft.disabled  = !canMove;
+  btnRight.disabled = !canMove;
+  // If a state change disables a button mid-hold, clear the held flag so the
+  // launcher doesn't coast after a phase transition.
+  if (btnLeft.disabled  && heldKeys.has('KeyA')) { heldKeys.delete('KeyA'); btnLeft.classList.remove('held'); }
+  if (btnRight.disabled && heldKeys.has('KeyD')) { heldKeys.delete('KeyD'); btnRight.classList.remove('held'); }
+  if (phase === 'TITLE')          btnAdv.textContent = 'START';
+  else if (phase === 'EMPLACEMENT') btnAdv.textContent = 'READY';
+  else if (phase === 'WAVE_END')   btnAdv.textContent = 'NEXT WAVE';
+  else if (phase === 'GAME_OVER')  btnAdv.textContent = 'HOME';
+  else                              btnAdv.textContent = 'COMBAT';
+  btnAdv.disabled = (phase === 'COMBAT');
+}
+
+// Hook the per-frame sync into the render loop. We can't insert into render()
+// without a bigger refactor, so just piggyback on requestAnimationFrame.
+function tickTouchControls() {
+  updateTouchControls();
+  requestAnimationFrame(tickTouchControls);
+}
+if (isTouchDevice) requestAnimationFrame(tickTouchControls);
+
+// ============================================================================
+// Auto-pilot — persona-driven bot.
+//
+// A bot reads the same state.tick snapshots a human sees and sends the same
+// input verbs (input.fire / input.launcher_move / input.steer / input.fire_mode
+// / input.resupply / input.state_advance / input.bunker_run / input.camel_release).
+// The server cannot tell a bot from a human. Enable via URL params:
+//   /mp?bot=trigger        (bot=<persona> implies auto-play; auto=1 alone → trigger)
+// or from devtools: BOT.enable('deadeye').
+//
+// Each persona is one parameter set over a single heuristic core: pick the most
+// threatening live shahed, slide the launcher under its predicted intercept-X,
+// fire when lined up and off cooldown. Personae differ only in the knobs below.
+// See docs/design/airdefenders-multiplayer.md §"Auto-pilot personae".
+// ============================================================================
+const PERSONAS = {
+  // mode       fire_mode to hold (0 manual / 1 armed-prox / 2 autopilot); null = leave alone
+  // fireMs     min ms between fire attempts
+  // aimTol     px |targetX-launcherX| within which it fires
+  // aimNoise   px random jitter added to the target each decision
+  // moveSpeed  0..1 fraction of the ±6 px/tick max launcher step it uses
+  // reactionMs ms between decisions (higher = more sluggish)
+  // churn      prob/decision of picking a random target instead of the most urgent
+  // vis        true = ignore shaheds the radar can't see (visible <= 0.1)
+  // resupplyAt reload when interceptors_left <= this
+  // steer      true = manually steer the in-flight interceptor toward the target
+  // modeFlip   true = randomly cycle fire_mode (chaos)
+  // napProb/napMs  chance/decision to "nap" (idle) for napMs
+  // roam       true = sweep the launcher across the whole field, spraying
+  // useCamel   true = release camels when the pool has them
+  // holdCenter true = sit at mid-field when there is no target
+  trigger: { label:'Trigger', mode:2,    fireMs:110, aimTol:130, aimNoise:25,  moveSpeed:0.90, reactionMs:90,  churn:0.05, vis:false, resupplyAt:1 },
+  deadeye: { label:'Deadeye', mode:0,    fireMs:620, aimTol:13,  aimNoise:2,   moveSpeed:1.00, reactionMs:90,  churn:0.00, vis:false, resupplyAt:2, steer:true },
+  gremlin: { label:'Gremlin', mode:null, fireMs:190, aimTol:95,  aimNoise:130, moveSpeed:1.00, reactionMs:120, churn:0.50, vis:false, resupplyAt:0, modeFlip:true },
+  dozer:   { label:'Dozer',   mode:1,    fireMs:900, aimTol:60,  aimNoise:30,  moveSpeed:0.35, reactionMs:430, churn:0.10, vis:false, resupplyAt:0, napProb:0.03, napMs:2600 },
+  sloppy:  { label:'Sloppy',  mode:2,    fireMs:180, aimTol:75,  aimNoise:75,  moveSpeed:0.70, reactionMs:160, churn:0.35, vis:false, resupplyAt:1 },
+  squint:  { label:'Squint',  mode:0,    fireMs:380, aimTol:20,  aimNoise:8,   moveSpeed:0.90, reactionMs:120, churn:0.05, vis:true,  resupplyAt:2, steer:true },
+  nomad:   { label:'Nomad',   mode:2,    fireMs:150, aimTol:90,  aimNoise:30,  moveSpeed:1.00, reactionMs:100, churn:0.10, vis:false, resupplyAt:1, roam:true },
+  camel:   { label:'Camel',   mode:1,    fireMs:520, aimTol:48,  aimNoise:25,  moveSpeed:0.50, reactionMs:150, churn:0.10, vis:false, resupplyAt:2, useCamel:true, holdCenter:true },
+};
+
+const BOT = {
+  active: false, persona: null, name: 'bot',
+  _lastDecision: 0, _lastFire: 0, _lastMove: 0, _lastSteer: 0,
+  _lastMode: 0, _lastResupply: 0, _lastAdvance: 0, _lastCamel: 0,
+  _napUntil: 0, _nameSent: false, _targetX: null,
+
+  rnd() { return Math.random(); },
+
+  enable(name) {
+    const p = PERSONAS[name];
+    if (!p) { console.warn('[bot] unknown persona', name, '— known:', Object.keys(PERSONAS).join(',')); return; }
+    this.active = true; this.persona = p; this.name = p.label;
+    try { document.title = 'AD bot · ' + p.label; } catch (_) {}
+    console.log('[bot] persona enabled:', p.label);
+  },
+
+  init() {
+    const q = new URLSearchParams(window.location.search);
+    const b = (q.get('bot') || '').toLowerCase();
+    if (b && PERSONAS[b]) this.enable(b);
+    else if (q.get('auto') === '1') this.enable('trigger');
+  },
+
+  // Most urgent live shahed = closest to the ground (largest y); optionally
+  // restricted to radar-visible ones. Returns a shahed or null.
+  pickTarget(snap) {
+    const p = this.persona;
+    let pool = (snap.shaheds || []).filter(s => s.alive !== false);
+    if (p.vis) pool = pool.filter(s => (s.visible == null ? 1 : s.visible) > 0.1);
+    if (!pool.length) return null;
+    if (this.rnd() < p.churn) return pool[(this.rnd() * pool.length) | 0];
+    let best = null;
+    for (const s of pool) if (!best || s.pos.y > best.pos.y) best = s;
+    return best;
+  },
+
+  tick() {
+    if (!this.active) return;
+    const snap = MP.snapCurr; if (!snap) return;
+    const now = performance.now();
+    const p = this.persona;
+
+    // Assert our persona name once we have a player id (covers reconnect paths).
+    if (!this._nameSent && MP.playerId > 0 && MP.ws && MP.ws.readyState === WebSocket.OPEN) {
+      MP.send('input.set_name', { name: this.name });
+      this._nameSent = true;
+    }
+
+    // Non-combat: keep nudging the state machine so a bot needs zero clicks.
+    // WAVE_END only accepts the advance once the server's waveEndTimer>60, so
+    // we just retry on a throttle until it takes.
+    if (snap.phase !== 'COMBAT') {
+      if (now - this._lastAdvance > 400) { MP.send('input.state_advance', {}); this._lastAdvance = now; }
+      this._targetX = null;
+      return;
+    }
+
+    // Survive the bunker mini-game regardless of persona — hit RUN whenever the
+    // server offers it, else the run just ends.
+    if (snap.bunker && snap.bunker.phase === 'active') MP.send('input.bunker_run', {});
+
+    const myL = MP.myLauncher();
+    if (!myL) return;
+    if (now < this._napUntil) return;
+
+    // ---- decision (throttled by reactionMs) ----
+    if (now - this._lastDecision >= p.reactionMs) {
+      this._lastDecision = now;
+      if (p.napProb && this.rnd() < p.napProb) { this._napUntil = now + p.napMs; return; }
+
+      // camel release (Camel persona)
+      if (p.useCamel && snap.camel_mode && (snap.camel_pool | 0) > 0 && now - this._lastCamel > 1500) {
+        MP.send('input.camel_release', {}); this._lastCamel = now;
+      }
+
+      // fire-mode: chaos cycles, others hold a preference
+      if (p.modeFlip && now - this._lastMode > 700) {
+        MP.send('input.fire_mode', { launcher_idx: myL.idx, mode: ((myL.fire_mode || 0) + 1) % 3 });
+        this._lastMode = now;
+      } else if (p.mode != null && (myL.fire_mode || 0) !== p.mode && now - this._lastMode > 500) {
+        MP.send('input.fire_mode', { launcher_idx: myL.idx, mode: p.mode });
+        this._lastMode = now;
+      }
+
+      // resupply before running dry
+      if ((myL.interceptors_left | 0) <= (p.resupplyAt | 0) && !myL.resupplying && now - this._lastResupply > 800) {
+        MP.send('input.resupply', { launcher_idx: myL.idx }); this._lastResupply = now;
+      }
+
+      // choose an aim-X
+      const tgt = this.pickTarget(snap);
+      let tx;
+      if (p.roam) { tx = GAME_W / 2 + Math.sin(now / 1000 * 0.6) * (GAME_W / 2 - 80); }
+      else if (tgt) { tx = tgt.pos.x + (tgt.vel ? tgt.vel.x * 6 : 0); }
+      else if (p.holdCenter) { tx = GAME_W / 2; }
+      else { tx = myL.x; }
+      tx += (this.rnd() * 2 - 1) * p.aimNoise;
+      this._targetX = Math.max(40, Math.min(GAME_W - 40, tx));
+
+      // manual steer (precision personas) toward the live target
+      if (p.steer && tgt && now - this._lastSteer >= 100) {
+        const eid = MP.myActiveInterceptorEid();
+        if (eid != null) { MP.send('input.steer', { interceptor_eid: eid, aim: { x: tgt.pos.x, y: tgt.pos.y } }); this._lastSteer = now; }
+      }
+
+      // fire when lined up, armed, off cooldown, with ammo to spare
+      const lined = Math.abs(this._targetX - myL.x) <= p.aimTol;
+      const ready = (myL.interceptors_left | 0) > 0 && !myL.arming && !myL.resupplying;
+      const wantFire = !!tgt || p.roam;
+      if (wantFire && lined && ready && now - this._lastFire >= p.fireMs) {
+        MP.send('input.fire', { launcher_idx: myL.idx }); this._lastFire = now;
+      }
+    }
+
+    // ---- movement (every frame, ~30 Hz throttle) toward the cached aim-X ----
+    if (this._targetX != null && now - this._lastMove >= 33) {
+      const delta = this._targetX - myL.x;
+      if (Math.abs(delta) > 2) {
+        const dx = Math.max(-6, Math.min(6, delta)) * p.moveSpeed;
+        if (Math.abs(dx) > 0.2) { MP.send('input.launcher_move', { launcher_idx: myL.idx, dx }); this._lastMove = now; }
+      }
+    }
+  },
+};
+window.BOT = BOT;
+BOT.init();
+
+// Boot.
+const savedName = (BOT.active ? BOT.name : null)
+  || localStorage.getItem('airdefenders_name') || ssGet('mp_name') || '';
+if (savedName) ssSet('mp_name', savedName);
+MP.connect();
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
