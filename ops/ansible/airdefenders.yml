@@ -50,10 +50,13 @@
   # constants stay here at the play level.
 
   vars:
-    airdefenders_dir: /opt/goat/airdefenders
+    # Where the game lives on the host, and who owns it. A deployment that
+    # already runs the game somewhere else sets airdefenders_site_dir /
+    # airdefenders_site_user in group_vars (play vars beat group_vars, so the
+    # override has to come in through these names).
+    airdefenders_dir: "{{ airdefenders_site_dir | default('/opt/goat/airdefenders') }}"
     airdefenders_data_dir: "{{ airdefenders_dir }}/data"
-    # User that owns the on-host directories.
-    airdefenders_user: "{{ nethost_user | default(ansible_user) }}"
+    airdefenders_user: "{{ airdefenders_site_user | default(nethost_user | default(ansible_user)) }}"
     # File-provider params; structural — same on every site.
     airdefenders_traefik_dynamic_dir: /etc/traefik/dynamic
     airdefenders_traefik_dynamic_filename: airdefenders.yml

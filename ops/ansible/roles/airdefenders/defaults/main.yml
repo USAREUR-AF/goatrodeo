@@ -20,7 +20,7 @@ airdefenders_image: ghcr.io/{{ ghcr_org }}/airdefenders:sha-986c1b3@sha256:97c2a
 
 # Where the compose stack lives on the host. Mirrors the airdefenders
 # playbook's `airdefenders_dir` default — kept in sync deliberately.
-airdefenders_dir: /opt/goat/airdefenders
+airdefenders_dir: "{{ airdefenders_site_dir | default('/opt/goat/airdefenders') }}"
 
 # ----- Per-site overridable defaults --------------
 # These live here (role defaults, lowest precedence) instead of inside
