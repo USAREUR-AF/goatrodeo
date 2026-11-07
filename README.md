@@ -37,3 +37,7 @@ The image builds on base images named by role, `ops/base-images/<role>/Dockerfil
 ## Contributing
 
 Pull requests are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md). Report security issues privately, as [SECURITY.md](SECURITY.md) describes.
+
+## Licence
+
+`goatrodeo` was written by U.S. Federal government employees. In the U.S. it is not subject to copyright and is in the public domain; in countries where copyright is recognized, it is released under the [Apache License 2.0](LICENSE). See [INTENT.md](INTENT.md).
