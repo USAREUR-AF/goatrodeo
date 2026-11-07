@@ -30,7 +30,7 @@ One domain, one container, one process. No separate database container, no cross
 
 - **Go 1.22** (stdlib `net/http` with pattern-matched routes)
 - **SQLite** via `modernc.org/sqlite` (pure-Go, no CGO → fully static binary)
-- **Base images by role** `go-build` (build) + `runtime-static` (runtime), `ops/base-images/` (goatcore ADR 1220): public defaults `golang` + distroless static; an environment's overlay may name Chainguard's
+- **Base images by role** `go-build` (build) + `runtime-static` (runtime), `ops/base-images/` (goatcore ADR 1220): public defaults Chainguard's free `go` + `static` images, pinned by digest; an environment's overlay may name its private catalogue's
 - **Server-Sent Events** for live leaderboard pushes (reconnect handled by `EventSource` in the browser)
 - **Prometheus** text exposition, hand-rolled (no client library; six counters + three gauges)
 

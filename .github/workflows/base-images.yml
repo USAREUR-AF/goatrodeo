@@ -2,7 +2,7 @@ name: base-images
 
 # The public tree's base images (goatcore ADR 1220, docs/design/base-images.md).
 # Every Dockerfile names its base images through a role in ops/base-images/,
-# every role is a digest-pinned image anyone may pull and redistribute, and no
+# every role is a digest-pinned image anyone may pull without an account, and no
 # Dockerfile, role default or compose template points at a subscription
 # registry except the waived references in ops/base-images/vendor-refs.allow.
 # An overlay replaces the role files with its own; this guard runs only here.
