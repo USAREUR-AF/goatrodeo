@@ -18,15 +18,15 @@ Thank you for working on goat. This page is the whole process; nothing else is r
 
 ## Gates
 
-Every check that has a script here can be run locally before you push. The ones that apply to most changes:
+Every check can be run locally before you push. The scripts are goatcore's: run them from a goatcore checkout beside this one. The ones that apply to most changes:
 
 | Change touches | Run |
 |---|---|
-| anything | `ops/ci/check-no-identity-spillage.sh` — no keys, addresses or credential values in a committed file |
+| anything | `../goatcore/ops/ci/check-no-identity-spillage.sh` — no keys, addresses or credential values in a committed file |
 | Rust (`crates/`) | `cd crates && cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo test --workspace` |
 | Go (`ops/*/go.mod`) | `go vet ./... && go test ./...` in that module |
-| Ansible | `ops/ci/check-role-template-refs-resolve.sh` · `ansible-playbook --syntax-check` on the playbook you changed |
-| Shell | `shellcheck` · `ops/ci/check-bash-portability.sh` (scripts must run on bash 3.2) |
+| Ansible | `../goatcore/ops/ci/check-role-template-refs-resolve.sh` · `ansible-playbook --syntax-check` on the playbook you changed |
+| Shell | `shellcheck` · `../goatcore/ops/ci/check-bash-portability.sh` (scripts must run on bash 3.2) |
 
 The pull-request workflow runs the same scripts. A red gate names the script, so the fix is reproducible locally. The fuller set of documentation gates, and the decision record, live in [`goatcore`](https://github.com/usareur-af/goatcore).
 
@@ -49,7 +49,7 @@ Reviewers look for: the change does what its subject says and nothing else; the 
 
 ## Merging
 
-Until development moves to these repositories, the source of record is a private upstream repository, and each release here is exported from it. A maintainer who merges a pull request here carries it into the upstream before the next export; the export refuses to publish over a merged commit it has not been told was carried, so an uncarried merge holds every later release rather than being overwritten.
+Development happens in this repository. A pull request merged to `main` is the change; there is no other upstream. A deployment picks it up by moving the commit it pins, in its own overlay repository.
 
 ## Reporting a bug or proposing a feature
 
