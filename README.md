@@ -32,7 +32,7 @@ The image is built by `.github/workflows/airdefenders-image.yml` and published a
 
 ## Base images
 
-The image builds on base images named by role, `ops/base-images/<role>/Dockerfile` (`go-build`, `runtime-static`); the defaults are images anyone may redistribute. To build on your own, such as a hardened catalogue, put your own role files at the same paths in your environment and copy it over this checkout before building: goatcore's [build goat images on your own base images](https://github.com/usareur-af/goatcore/blob/main/docs/operations/build-on-your-own-base-images.md). `ops/base-images/base-images.py` and the two role files are the same files as goatcore's.
+The image builds on base images named by role, `ops/base-images/<role>/Dockerfile` (`go-build`, `runtime-static`); the defaults are Chainguard's free images, pinned by digest. To build on your own, such as a private Chainguard catalogue, put your own role files at the same paths in your environment and copy it over this checkout before building: goatcore's [build goat images on your own base images](https://github.com/usareur-af/goatcore/blob/main/docs/operations/build-on-your-own-base-images.md). `ops/base-images/base-images.py` and the two role files are the same files as goatcore's.
 
 ## Contributing
 
