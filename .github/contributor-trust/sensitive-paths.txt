@@ -1,0 +1,21 @@
+# Paths where a change from a contributor outside the maintainers needs a
+# recorded security review, even when the contributor is known (ADR 1221 in
+# USAREUR-AF/goatcore). One glob per line: `**` crosses directories, `*` stays
+# in one directory, a pattern with no slash matches that file name anywhere.
+# Owners edit this file; it takes effect when the edit merges.
+
+# What runs in CI, what builds images, what is pinned
+.github/**
+Dockerfile*
+*.Dockerfile
+ops/base-images/**
+base-images/**
+Cargo.lock
+go.sum
+package-lock.json
+pnpm-lock.yaml
+CODEOWNERS
+SECURITY.md
+
+# Code and roles that run on hosts
+ops/**
