@@ -1,0 +1,35 @@
+name: base-images-shared
+
+# goatcore owns ops/base-images/base-images.py and the role files it defines,
+# and its Dependabot refreshes them (goatcore ADR 1220, docs/design/base-images.md
+# §Refresh). This repository's copies must equal goatcore main's byte for byte:
+# an environment's assembly refuses a shared path that differs. Runs on a pull
+# request that touches ops/base-images/, and daily, so a refresh in goatcore
+# shows here as a failing run. Fix: `bash .github/scripts/base-images-shared.sh --fix`
+# on a branch, then open a pull request.
+
+on:
+  pull_request:
+    paths:
+      - 'ops/base-images/**'
+      - '.github/scripts/base-images-shared.sh'
+      - '.github/workflows/base-images-shared.yml'
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  shared:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Shared base-image files equal goatcore main's
+        run: bash .github/scripts/base-images-shared.sh
