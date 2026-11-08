@@ -1,0 +1,65 @@
+# contributor-trust: a required check on every pull request to main (ADR 1221
+# in USAREUR-AF/goatcore). The check itself lives in goatcore; this repository
+# keeps only its own list of sensitive paths.
+#
+# pull_request_target runs this file as it is on main. The pull request's
+# code is never checked out, built or run: the script reads the author and
+# the changed paths from the API.
+name: contributor-trust
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: write   # only to remove a stale security-reviewed label
+
+concurrency:
+  group: contributor-trust-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  contributor-trust:
+    name: contributor-trust
+    # Every event runs the whole check: a skipped run of a required check
+    # counts as passed.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: this repository's sensitive paths, from the base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          sparse-checkout: .github/contributor-trust
+          persist-credentials: false
+
+      - name: the check, from goatcore main
+        uses: actions/checkout@v4
+        with:
+          repository: USAREUR-AF/goatcore
+          ref: main
+          path: .goatcore-trust
+          sparse-checkout: .github/contributor-trust
+          persist-credentials: false
+
+      - name: a new push withdraws an earlier security review
+        if: >-
+          github.event.action == 'synchronize'
+          && contains(github.event.pull_request.labels.*.name, 'security-reviewed')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/security-reviewed"
+
+      - name: decide
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_AUTHOR_ASSOCIATION: ${{ github.event.pull_request.author_association }}
+          CONTRIBUTOR_ROSTER_REPO: ${{ vars.CONTRIBUTOR_ROSTER_REPO }}
+          CONTRIBUTOR_ROSTER_TOKEN: ${{ secrets.CONTRIBUTOR_ROSTER_TOKEN }}
+          SENSITIVE_PATHS: .github/contributor-trust/sensitive-paths.txt
+        run: python3 .goatcore-trust/.github/contributor-trust/check.py
