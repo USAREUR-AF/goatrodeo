@@ -16,7 +16,7 @@
 # multi-arch index digest (sha256 of the OCI image index) — `docker
 # compose pull` resolves the right arch leaf for the host (arm64 or amd64).
 
-airdefenders_image: ghcr.io/{{ ghcr_org }}/airdefenders:sha-986c1b3@sha256:97c2a1c057c63d4382bfab5a77e61673b131b8d8f873659f57d1393997324869
+airdefenders_image: ghcr.io/{{ ghcr_org }}/airdefenders:sha-87590fd@sha256:0b4442efa4198fc1b9e401e8bef79390ec1aa7b688779d939e29585a2bf5c6c7
 
 # Where the compose stack lives on the host. Mirrors the airdefenders
 # playbook's `airdefenders_dir` default — kept in sync deliberately.
