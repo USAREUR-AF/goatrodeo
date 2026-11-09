@@ -1610,12 +1610,17 @@ function drawReconnectBanner() {
   ctx.textAlign = 'left';
 }
 
-function render() {
-  // 60 fps poll + paint
+let lastRenderTs = null;
+function render(ts) {
+  // Poll + paint once per display frame (any refresh rate)
   pollHeldKeys();
   if (BOT.active) BOT.tick();
-  // Advance the sweep-radar angle each frame (matches single-player's 60 fps loop).
-  sweepAngle = (sweepAngle + SWEEP_RATE) % (Math.PI * 2);
+  // Advance the sweep-radar angle by elapsed time, not per frame: SWEEP_RATE is
+  // radians per 1/60 s, so on a 144 Hz screen a per-frame step spun it 2.4x.
+  if (ts === undefined) ts = performance.now();
+  const frames60 = lastRenderTs === null ? 1 : Math.min(ts - lastRenderTs, 250) / (1000 / 60);
+  lastRenderTs = ts;
+  sweepAngle = (sweepAngle + SWEEP_RATE * frames60) % (Math.PI * 2);
   ctx.clearRect(0, 0, GAME_W, GAME_H);
   ctx.fillStyle = '#060612';
   ctx.fillRect(0, 0, GAME_W, GAME_H);
