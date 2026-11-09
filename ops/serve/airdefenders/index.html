@@ -2812,8 +2812,29 @@ function render() {
 }
 
 // --- MAIN LOOP ---
-function loop() {
-  render();
+// Every speed, timer and cooldown in this file is "per frame at 60 fps", and
+// render() both advances and draws the game. Driving it straight from
+// requestAnimationFrame ran the game at the monitor's refresh rate (2.4x speed
+// on a 144 Hz screen, half speed at 30 Hz). Instead, accumulate real elapsed
+// time and run render() once per 1/60 s of it: a fast display skips frames
+// (the canvas keeps the last one), a slow one runs several steps per paint.
+const SIM_STEP_MS = 1000 / 60;
+const SIM_STEP_SLACK_MS = 1;        // absorbs rAF jitter on a 60 Hz display
+const SIM_MAX_STEPS_PER_FRAME = 4;  // past this, slow down rather than spiral
+const SIM_MAX_FRAME_GAP_MS = 250;   // a backgrounded tab doesn't fast-forward
+let simLastTs = null;
+let simAccMs = 0;
+function loop(ts) {
+  if (simLastTs === null) simLastTs = ts;
+  simAccMs += Math.min(ts - simLastTs, SIM_MAX_FRAME_GAP_MS);
+  simLastTs = ts;
+  let steps = 0;
+  while (simAccMs >= SIM_STEP_MS - SIM_STEP_SLACK_MS && steps < SIM_MAX_STEPS_PER_FRAME) {
+    render();
+    simAccMs -= SIM_STEP_MS;
+    steps++;
+  }
+  if (steps === SIM_MAX_STEPS_PER_FRAME) simAccMs = Math.min(simAccMs, 0);
   requestAnimationFrame(loop);
 }
 
@@ -2924,7 +2945,7 @@ setInterval(() => refreshServerScores(leaderboardPeriod, false), 15000);
 // Retry queued offline submissions periodically.
 setInterval(flushPending, 30000);
 
-loop();
+requestAnimationFrame(loop);
 </script>
 </body>
 </html>
