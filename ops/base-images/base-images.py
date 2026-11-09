@@ -90,6 +90,7 @@ def files(root):
         if listed:
             return sorted(x for x in listed if os.path.isfile(os.path.join(root, x)))
     except (OSError, subprocess.CalledProcessError):
+        # Archives and hosts without Git use the filesystem walk below.
         pass
     out = []
     for d, dirs, fs in os.walk(root):
