@@ -5,7 +5,8 @@
     scan-diff.py --self-test
 
 Reads the lines added between the merge base of <base> and <head> (git diff,
-no context) and fails on two classes:
+no context) and the path of every file the change adds, copies or renames,
+and fails on two classes:
 
   derived-token  a name of the maintainers' own deployments. The list is not
                  in this repository: it arrives in the environment variable
@@ -13,15 +14,20 @@ no context) and fails on two classes:
                  the newline-separated list, gzip-compressed or plain), or in
                  --needles-file. Matching is case-insensitive substring.
   shapes         material that is never right in this repository whatever its
-                 value: a PEM private-key block, AWS access key ids, JWTs,
-                 agent-session URLs, releasability markings.
+                 value: a private-key block (PEM, OpenSSH, encrypted, PGP),
+                 AWS access key ids (long-term and temporary), GitHub, Slack
+                 and Google API tokens, JWTs, agent-session URLs,
+                 releasability markings.
 
 A line carrying `oss-allow: <reason>` is exempt from both classes, as in the
-export's own gate; each exemption is listed as a notice for the reviewer.
+export's own gate; each exemption is listed as a notice for the reviewer. A
+path is never exempt.
 
 A hit prints as <file>:<line>: <class> and, for a derived token, the first 12
 hex characters of the sha256 of the lower-cased needle. Neither the needle nor
-the line is ever printed. Under GitHub Actions each hit is also an annotation.
+the line is ever printed. A hit in a path prints as <path>:0: path <class>,
+with every matched part of the path replaced by <needle#id> or <class>. Under
+GitHub Actions each hit is also an annotation.
 
 Exit: 0 clean, 1 hits, 2 usage error or no needle list (fails closed).
 """
@@ -38,8 +44,11 @@ import tempfile
 
 SHAPES = [
     # the header standing alone on its line is a key block; inside a string literal it is code
-    ("pem-private", r"^\s*-----BEGIN (RSA |EC |OPENSSH |DSA |ENCRYPTED |)PRIVATE KEY-----\s*$"),
-    ("aws-access-key-id", r"\bAKIA[0-9A-Z]{16}\b"),
+    ("pem-private", r"^\s*-----BEGIN ((RSA |EC |OPENSSH |DSA |ENCRYPTED |)PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----\s*$"),
+    ("aws-access-key-id", r"\b(AKIA|ASIA)[0-9A-Z]{16}\b"),
+    ("github-token", r"\bgh[pousr]_[A-Za-z0-9]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{22,}\b"),
+    ("slack-token", r"\bxox[abposr]-[A-Za-z0-9-]{10,}"),
+    ("google-api-key", r"\bAIza[0-9A-Za-z_-]{35}\b"),
     ("jwt", r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\."),
     ("agent-session-url", r"claude\.ai/code/|chatgpt\.com/c/|/sessions?/[0-9a-f-]{20,}"),
     ("releasability-marking", r"^\s*(CUI|UNCLASSIFIED|CONFIDENTIAL|SECRET|TOP SECRET)//|//(NOFORN|REL TO [A-Z]{3})"),
@@ -107,6 +116,18 @@ def added_lines(repo: str, base: str, head: str):
             lineno += 1
 
 
+def added_paths(repo: str, base: str, head: str):
+    """Yield the path of every file the change adds, copies or renames (a rename is an add here)."""
+    cmd = ["git", "-C", repo, "-c", "core.quotePath=false", "diff", "--name-only", "--no-renames",
+           "--diff-filter=AC", "-z", f"{base}...{head}"]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0:
+        sys.exit("leak-gate: git diff failed: " + proc.stderr.decode("utf-8", "replace")[-400:])
+    for raw in proc.stdout.split(b"\0"):
+        if raw:
+            yield raw.decode("utf-8", "replace")
+
+
 def skipped(path: str) -> bool:
     return path.endswith(SKIP_SUFFIXES) or any(p in "/" + path for p in SKIP_PARTS)
 
@@ -137,6 +158,34 @@ def trie_regex(words) -> str:
             return "(?:" + body + ")?"
         return body
     return emit(trie)
+
+
+def scan_paths(paths, needles):
+    """Return hits in path names, each with the path redacted so no matched value is printed."""
+    needle_re = re.compile(trie_regex(needles)) if needles else None
+    hits = []
+    for path in paths:
+        found, spans = [], []
+        if needle_re is not None:
+            for m in needle_re.finditer(path.lower()):
+                nid = needle_id(m.group(0))
+                found.append(("path derived-token", nid))
+                spans.append((m.start(), m.end(), f"<needle#{nid}>"))
+        for cls, rx in SHAPE_RES:
+            for m in rx.finditer(path):
+                found.append(("path " + cls, ""))
+                spans.append((m.start(), m.end(), f"<{cls}>"))
+        if not found:
+            continue
+        shown, last = [], 0
+        for start, end, mark in sorted(spans):
+            if start < last:
+                continue
+            shown.append(path[last:start] + mark)
+            last = end
+        redacted = "".join(shown) + path[last:]
+        hits.extend((redacted, 0, cls, nid) for cls, nid in dict.fromkeys(found))
+    return hits
 
 
 def scan(lines, needles):
@@ -175,7 +224,10 @@ def report(result, n_needles) -> int:
     for path, lineno, cls, nid in hits:
         what = f"{cls} needle#{nid}" if nid else cls
         print(f"{path}:{lineno}: {what}")
-        if in_actions:
+        if in_actions and lineno == 0:
+            # a path hit: the redacted path names no file, so the annotation carries it as text
+            print(f"::error title=leak-gate::{annotation_escape(path)}: {what}")
+        elif in_actions:
             print(f"::error file={annotation_escape(path)},line={lineno},title=leak-gate::{what}")
     print(f"leak-gate: needles={n_needles} hits={len(hits)} exempt={len(exempt)}")
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -203,6 +255,8 @@ def self_test() -> int:
         git("init", "-q", "-b", "main")
         with open(os.path.join(d, "a.txt"), "w") as fh:
             fh.write("one\n" + needle + " was here before\n")
+        with open(os.path.join(d, "old.txt"), "w") as fh:
+            fh.write("renamed below\n")
         git("add", "-A"); git("commit", "-q", "-m", "base")
         base = subprocess.run(["git", "-C", d, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
         with open(os.path.join(d, "a.txt"), "a") as fh:
@@ -211,6 +265,19 @@ def self_test() -> int:
                      + '"-----BEGIN ' + 'PRIVATE KEY-----\\n"\n' + "-----BEGIN " + "PRIVATE KEY-----\n")
         with open(os.path.join(d, "go.sum"), "w") as fh:
             fh.write(needle + "\n")
+        dashes = "-" * 5
+        with open(os.path.join(d, "b.txt"), "w") as fh:
+            fh.write("ASIA" + "Q" * 16 + "\n"
+                     + "gh" + "p_" + "a" * 36 + "\n"
+                     + "github" + "_pat_" + "b" * 30 + "\n"
+                     + "xox" + "b-" + "1" * 12 + "-abc\n"
+                     + "AI" + "za" + "c" * 35 + "\n"
+                     + dashes + "BEGIN PGP " + "PRIVATE KEY BLOCK" + dashes + "\n"
+                     + dashes + "BEGIN ENCRYPTED " + "PRIVATE KEY" + dashes + "\n")
+        os.makedirs(os.path.join(d, "notes", needle))
+        with open(os.path.join(d, "notes", needle, "readme.md"), "w") as fh:
+            fh.write("nothing here\n")
+        git("mv", "old.txt", "moved-" + needle + ".txt")
         git("add", "-A"); git("commit", "-q", "-m", "head")
         head = subprocess.run(["git", "-C", d, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
         env = dict(os.environ, GOAT_LEAK_NEEDLES=base64.b64encode(gzip.compress((needle + "\n#comment\n").encode())).decode())
@@ -221,7 +288,12 @@ def self_test() -> int:
         want = [f"a.txt:4: derived-token needle#{needle_id(needle)}", "a.txt:6: aws-access-key-id",
                 "a.txt:5: exempt by oss-allow: aws-access-key-id",
                 f"a.txt:7: exempt by oss-allow: derived-token needle#{needle_id(needle)}",
-                "a.txt:9: pem-private", "hits=3 exempt=2"]
+                "a.txt:9: pem-private",
+                "b.txt:1: aws-access-key-id", "b.txt:2: github-token", "b.txt:3: github-token",
+                "b.txt:4: slack-token", "b.txt:5: google-api-key", "b.txt:6: pem-private", "b.txt:7: pem-private",
+                f"notes/<needle#{needle_id(needle)}>/readme.md:0: path derived-token needle#{needle_id(needle)}",
+                f"moved-<needle#{needle_id(needle)}>.txt:0: path derived-token needle#{needle_id(needle)}",
+                "hits=12 exempt=2"]
         problems = [f"missing {w!r}" for w in want if w not in out]
         if needle.lower() in out.lower() or key in out:
             problems.append("a matched value was printed")
@@ -256,7 +328,9 @@ def main() -> int:
         print("leak-gate: no needle list. The repository secret GOAT_LEAK_NEEDLES is unset or empty; "
               "an owner sets it. The gate fails closed.", file=sys.stderr)
         return 2
-    return report(scan(added_lines(a.repo, a.base, a.head), needles), len(needles))
+    hits, exempt = scan(added_lines(a.repo, a.base, a.head), needles)
+    hits = scan_paths(added_paths(a.repo, a.base, a.head), needles) + hits
+    return report((hits, exempt), len(needles))
 
 
 if __name__ == "__main__":
