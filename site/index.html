@@ -1,0 +1,404 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>goatrodeo</title>
+<meta name="description" content="Games and toys that run on a goat data fabric. Air Defenders: solo, co-op for eight, eight bots, and four events published while you play.">
+<link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+<style>
+:root {
+  --bg: #f2f0e6; --bg2: #e8e5d6; --panel: #fbfaf4; --ink: #10201a; --quiet: #45564d; --rule: #c9c6b3;
+  --accent: #0a6e40; --on-accent: #ffffff; --accent-ink: #0a6e40; --drone: #a8470c; --radar: #11607a;
+  --code-bg: #10201a; --code-ink: #d9f2e4; --bgcode: rgba(16, 32, 26, .07); --screen: #05070f;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #05070f; --bg2: #0a0f1c; --panel: #0b1120; --ink: #d9f2e4; --quiet: #93ab9f; --rule: #1f2a3d;
+    --accent: #39f29a; --on-accent: #04130b; --accent-ink: #39f29a; --drone: #ff8a3d; --radar: #5cc8dc;
+    --code-bg: #0b1120; --code-ink: #d9f2e4; --bgcode: rgba(57, 242, 154, .075);
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 17px/1.6 var(--sans); }
+a { color: var(--accent-ink); }
+a:focus-visible, button:focus-visible { outline: 3px solid var(--drone); outline-offset: 3px; }
+code, pre, kbd { font-family: var(--mono); }
+.wrap { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+
+/* top bar */
+.top { position: absolute; top: 0; left: 0; right: 0; z-index: 3; }
+.top .wrap { display: flex; align-items: center; justify-content: space-between; height: 72px; }
+.brand { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font: 700 17px var(--mono); }
+.brand svg { width: 30px; height: 30px; }
+.top nav { display: flex; gap: 26px; font: 15px var(--mono); }
+.top nav a { color: var(--ink); text-decoration: none; }
+.top nav a:hover { color: var(--accent-ink); }
+
+/* hero: the first screen */
+.hero { position: relative; min-height: max(640px, 88vh); display: flex; flex-direction: column; overflow: hidden;
+  background: radial-gradient(1100px 700px at 78% 40%, var(--bg2), var(--bg) 70%); }
+.bgcode { position: absolute; top: 70px; left: 46%; margin: 0; font: 15px/1.55 var(--mono); color: var(--bgcode);
+  white-space: pre; pointer-events: none; user-select: none; }
+.hero-main { position: relative; z-index: 1; flex: 1; display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(0, .92fr);
+  gap: 48px; align-items: center; padding-top: 88px; padding-bottom: 28px; }
+.prompt { font: 600 15px var(--mono); color: var(--radar); margin: 0 0 4px; }
+.cursor { display: inline-block; width: .6em; height: 1.05em; vertical-align: -3px; background: var(--drone); margin-left: 6px; animation: blink 1.06s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.wordmark { font: 900 84px/1 var(--mono); letter-spacing: -.045em; margin: 0; }
+.tagline { font: 700 23px/1.35 var(--sans); color: var(--accent-ink); margin: 14px 0 10px; }
+.lede { color: var(--quiet); margin: 0 0 26px; max-width: 36em; }
+.buttons { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+.btn { display: inline-flex; align-items: center; gap: 8px; padding: 11px 18px; border-radius: 4px; border: 1.5px solid var(--rule);
+  color: var(--ink); background: var(--panel); text-decoration: none; font: 700 15px var(--sans); cursor: pointer; }
+.btn svg { width: 18px; height: 18px; }
+.btn.star { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn:hover { border-color: var(--accent); }
+.cmd { display: flex; align-items: stretch; border: 1.5px solid var(--rule); border-radius: 4px; background: var(--code-bg); color: var(--code-ink); max-width: 640px; }
+.cmd pre { flex: 1; margin: 0; padding: 12px 14px; font-size: 13.5px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+.cmd .p { color: #39f29a; user-select: none; }
+.copy { border: 0; border-left: 1.5px solid #2b3a4f; background: transparent; color: #39f29a; font: 700 13px var(--mono); padding: 0 14px; cursor: pointer; }
+.cmd-note { font-size: 14px; color: var(--quiet); margin: 8px 0 0; }
+
+/* the arcade screen */
+.screen-wrap { justify-self: center; width: 100%; max-width: 500px; }
+.cabinet { position: relative; background: #0b0f1c; border-radius: 14px; padding: 14px; box-shadow: 0 0 0 1.5px #24304a, 0 30px 60px -25px rgba(0,0,0,.6); }
+.cabinet::after { content: ""; position: absolute; inset: 14px; border-radius: 6px; pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(0,0,0,.18) 0 1px, transparent 1px 3px); }
+.screen { position: relative; aspect-ratio: 640 / 560; border-radius: 6px; overflow: hidden; background: var(--screen); }
+.screen img, .screen iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
+.screen iframe { background: var(--screen); }
+.playover { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 2; }
+.playover .btn { background: rgba(5, 7, 15, .82); color: #39f29a; border-color: #39f29a; }
+.cabinet.playing::after { display: none; }
+.caption { font-size: 13.5px; color: var(--quiet); margin: 10px 2px 0; line-height: 1.45; }
+.caption a { color: inherit; }
+
+/* numbers at the bottom of the fold */
+.numbers { position: relative; z-index: 1; width: 100%; display: grid; grid-template-columns: repeat(4, 1fr); border: 1.5px solid var(--rule);
+  border-radius: 6px; background: var(--panel); margin-bottom: 0; }
+.numbers > div { padding: 16px 20px; border-left: 1.5px solid var(--rule); }
+.numbers > div:first-child { border-left: 0; }
+.numbers b { display: block; white-space: nowrap; font: 800 30px/1.1 var(--mono); color: var(--drone); }
+.numbers b .n { display: inline; font: inherit; }
+.numbers > div > span { display: block; font-weight: 700; font-size: 15px; }
+.numbers code { display: block; font-size: 12px; color: var(--quiet); margin-top: 4px; overflow-wrap: anywhere; }
+
+/* below the fold */
+section { padding: 84px 0 0; }
+h2 { font: 800 32px/1.2 var(--mono); letter-spacing: -.02em; margin: 0 0 10px; }
+h3 { font: 700 19px/1.3 var(--sans); margin: 0 0 8px; }
+.sub { color: var(--quiet); margin: 0 0 30px; max-width: 46em; }
+.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+.card { background: var(--panel); border: 1.5px solid var(--rule); border-radius: 6px; padding: 22px; }
+.card p { margin: 0; color: var(--quiet); font-size: 16px; }
+.card .k { font: 700 13px var(--mono); color: var(--radar); text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
+.feature { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 40px; align-items: center; margin-bottom: 56px; }
+.feature.flip > figure { order: 2; }
+figure { margin: 0; }
+figure img { width: 100%; height: auto; display: block; border-radius: 6px; border: 1.5px solid var(--rule); background: var(--screen); }
+figcaption { font-size: 13.5px; color: var(--quiet); margin-top: 8px; }
+.feature p { color: var(--quiet); }
+table { border-collapse: collapse; width: 100%; font-size: 15.5px; background: var(--panel); border: 1.5px solid var(--rule); border-radius: 6px; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font: 700 13px var(--mono); text-transform: uppercase; letter-spacing: .05em; color: var(--quiet); }
+tr:last-child td { border-bottom: 0; }
+.bots td:first-child { white-space: nowrap; width: 1%; }
+.bots td:first-child code { overflow-wrap: normal; }
+td code { font-size: 14px; overflow-wrap: anywhere; }
+.term { background: var(--code-bg); color: var(--code-ink); border-radius: 6px; padding: 16px 18px; font: 14px/1.6 var(--mono); overflow-x: auto; white-space: pre; margin: 0 0 16px; }
+.term .p { color: #39f29a; user-select: none; }
+.two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; }
+footer { margin-top: 96px; border-top: 1.5px solid var(--rule); padding: 28px 0 48px; color: var(--quiet); font-size: 15px; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: 14px 28px; justify-content: space-between; }
+footer a { color: inherit; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+
+@media (max-width: 980px) {
+  .hero-main { grid-template-columns: 1fr; gap: 28px; }
+  .bgcode { left: 30%; }
+  .screen-wrap { max-width: 520px; justify-self: start; }
+  .numbers { grid-template-columns: repeat(2, 1fr); margin-top: 24px; }
+  .numbers > div:nth-child(3) { border-left: 0; }
+  .numbers > div:nth-child(n+3) { border-top: 1.5px solid var(--rule); }
+  .cards, .feature, .two { grid-template-columns: minmax(0, 1fr); }
+  .feature.flip > figure { order: 0; }
+}
+@media (max-width: 600px) {
+  .wrap { padding: 0 16px; }
+  .top .wrap { height: 56px; }
+  .top nav { gap: 14px; font-size: 14px; }
+  .top nav .opt { display: none; }
+  .hero { min-height: 0; }
+  .hero-main { padding-top: 70px; }
+  .wordmark { font-size: 50px; }
+  .tagline { font-size: 18px; margin: 8px 0 6px; }
+  .lede { font-size: 15.5px; margin-bottom: 16px; }
+  .btn { padding: 9px 13px; font-size: 14px; }
+  .buttons { gap: 8px; margin-bottom: 12px; }
+  .cmd pre { font-size: 12.5px; padding: 10px 12px; }
+  .bgcode { font-size: 12px; left: 8%; opacity: .55; }
+  .numbers b { font-size: 24px; }
+  .numbers > div { padding: 12px 14px; }
+  h2 { font-size: 26px; }
+  section { padding-top: 64px; }
+}
+@media (prefers-reduced-motion: reduce) { .cursor { animation: none; } }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="#top" aria-label="goatrodeo, top of page">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14" fill="none" stroke="currentColor" stroke-width="2" opacity=".45"/><circle cx="16" cy="16" r="8" fill="none" stroke="currentColor" stroke-width="2" opacity=".7"/><path d="M16 16 L28 8" stroke="#39f29a" stroke-width="2.5" stroke-linecap="round"/><circle cx="16" cy="16" r="2.6" fill="#ff8a3d"/></svg>
+      goatrodeo
+    </a>
+    <nav aria-label="Sections">
+      <a href="#game">Game</a>
+      <a class="opt" href="#bots">Bots</a>
+      <a class="opt" href="#fabric">Fabric</a>
+      <a href="#run">Run it</a>
+      <a href="https://github.com/USAREUR-AF/goatrodeo">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+<div class="hero">
+<pre class="bgcode" aria-hidden="true">// run — the tick goroutine. Owns all mutation of r.g + r.players.
+func (r *Room) run(ctx context.Context) {
+	t := time.NewTicker(tickDur)
+	defer t.Stop()
+
+	var (
+		tickNum       uint32
+		lastActiveAt  = time.Now()
+		pausedForIdle bool
+	)
+
+	for {
+		select {
+		case &lt;-ctx.Done():
+			r.stopOnce.Do(func() { r.broadcastShutdown() })
+			return
+
+		case p := &lt;-r.joinCh:
+			r.players[p.ID] = p
+			r.hub.players.Add(1)</pre>
+
+  <div class="wrap hero-main">
+    <div>
+      <p class="prompt">&gt;_ goatrodeo --play<span class="cursor" aria-hidden="true"></span></p>
+      <h1 class="wordmark">goatrodeo</h1>
+      <p class="tagline">Games and toys that run on a goat data fabric.</p>
+      <p class="lede">Each one is fun to play and publishes real events while you play it. Air Defenders is the first: a browser arcade game, solo or co-op, that runs on a laptop with one Go command.</p>
+      <div class="buttons">
+        <a class="btn star" href="https://github.com/USAREUR-AF/goatrodeo">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" d="M12 2.8l2.8 5.8 6.4.9-4.6 4.5 1.1 6.3L12 17.3l-5.7 3 1.1-6.3-4.6-4.5 6.4-.9z"/></svg>
+          Star on GitHub
+        </a>
+        <button class="btn" type="button" data-play>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M7 4.5v15l12-7.5z"/></svg>
+          Play it here
+        </button>
+        <a class="btn" href="#run">Run it</a>
+        <a class="btn" href="https://github.com/USAREUR-AF/goatrodeo#readme">Docs</a>
+      </div>
+      <div class="cmd">
+        <pre><span class="p">$ </span>cd ops/serve/airdefenders
+<span class="p">$ </span>DB_PATH=./local-scores.db AD_DEMO_UNGATED=1 SITE_ID=zagros go run .</pre>
+        <button class="copy" type="button" data-copy="cd ops/serve/airdefenders && DB_PATH=./local-scores.db AD_DEMO_UNGATED=1 SITE_ID=zagros go run .">Copy</button>
+      </div>
+      <p class="cmd-note">From a clone of the repository; then open <code>http://localhost:8095/</code>.</p>
+    </div>
+
+    <div class="screen-wrap">
+      <div class="cabinet" id="cabinet">
+        <div class="screen" id="screen">
+          <picture>
+            <source srcset="assets/media/airdefenders-solo-play.png" media="(prefers-reduced-motion: reduce)">
+            <img src="assets/media/airdefenders-coop-bots.webp" width="640" height="560"
+              alt="Air Defenders in play: five launchers along the ground fire interceptors up at incoming drones while radar rings sweep the night sky and a player list shows five bots in the room">
+          </picture>
+          <div class="playover"><button class="btn" type="button" data-play>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M7 4.5v15l12-7.5z"/></svg>
+            Play it here</button></div>
+        </div>
+      </div>
+      <p class="caption" id="caption">A real capture: the co-op room with five auto-pilot bots, 8 seconds at 12 frames a second. How it was made: <a href="https://github.com/USAREUR-AF/goatrodeo/blob/main/docs/media/CAPTURES.md">docs/media/CAPTURES.md</a>.</p>
+    </div>
+  </div>
+
+  <div class="wrap" style="width:100%">
+    <div class="numbers" aria-label="Measured from the repository">
+      <div><b data-n="tick-hz">30</b><span>simulation steps a second</span><code>tickHz in multiplayer.go</code></div>
+      <div><b data-n="max-players">8</b><span>players in one co-op room</span><code>maxPlayers in multiplayer.go</code></div>
+      <div><b data-n="event-keys">4</b><span>event keys published</span><code>rows in topic-manifest.tsv</code></div>
+      <div><b><span class="n" data-n="game-kib">104</span> KiB</b><span>the solo game, one HTML file</span><code>wc -c airdefenders/index.html</code></div>
+    </div>
+  </div>
+</div>
+
+<section id="game">
+  <div class="wrap">
+    <h2>What it is</h2>
+    <p class="sub">One small Go program with three web pages inside it. One container, one process, one SQLite file. None of it is needed to run a goatnet; it sits beside <a href="https://github.com/USAREUR-AF/goatcore">goatcore</a>, which builds the goatnet, and <a href="https://github.com/USAREUR-AF/goatstuff">goatstuff</a>, which holds the surfaces you would watch it from.</p>
+    <div class="cards">
+      <div class="card"><div class="k">Solo</div><h3>Air Defenders</h3><p>Steer interceptors into incoming drones before they reach the ground. Three fire modes: steered by hand, proximity-fused, or seeking on their own. When a wave ends, the sky shows the path of every shot.</p></div>
+      <div class="card"><div class="k">Co-op</div><h3>Up to <span data-n="max-players">8</span> players, one room</h3><p>One shared score and one set of lives; each player gets a launcher in their own color. The server owns the game and steps it <span data-n="tick-hz">30</span> times a second; browsers send key presses and draw what they are told.</p></div>
+      <div class="card"><div class="k">Fabric</div><h3>Events while you play</h3><p>On a goatnet, four moments in the game loop are published onto the Zenoh fabric: a radar detection, a launch, an intercept, and a drone reaching the ground.</p></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="feature">
+      <figure>
+        <img src="assets/media/airdefenders-title-screen.png" width="800" height="700" loading="lazy"
+          alt="Air Defenders title screen: the game name in green, an empty high-score table with daily to all-time tabs, the key bindings, a press-space-to-start prompt and a co-op multiplayer button">
+        <figcaption>Real capture, 800 × 700: the solo title screen.</figcaption>
+      </figure>
+      <div>
+        <h2>Shared high scores, and a board that still draws offline</h2>
+        <p>High scores are shared between everyone who can reach the server and arrive live over Server-Sent Events. The browser keeps its own copy, so the board still draws when the network is away. The copy of the game on this page has no server behind it, so its scores stay in your browser.</p>
+        <p><a href="https://github.com/USAREUR-AF/goatrodeo/blob/main/docs/design/airdefenders-leaderboard.md">Design: airdefenders-leaderboard.md</a></p>
+      </div>
+    </div>
+    <div class="feature flip">
+      <figure>
+        <img src="assets/media/airdefenders-solo-play.png" width="800" height="700" loading="lazy"
+          alt="Air Defenders solo play in wave 1: score 450, autopilot fire mode, a radar beam sweeping from the launcher across two orange drones and two gray aircraft among radar rings">
+        <figcaption>Real capture, 800 × 700: solo play in wave 1, autopilot fire mode.</figcaption>
+      </figure>
+      <div>
+        <h2>Radars only show you part of the sky</h2>
+        <p>You have one launcher, a handful of interceptors and three ways to fire them. Later waves add a second launcher, a siren that sends you running for the bunker, and a relief wave in which camels handle the air defense.</p>
+        <table aria-label="Keys">
+          <thead><tr><th>Key</th><th>Does</th></tr></thead>
+          <tbody>
+            <tr><td><kbd>Space</kbd></td><td>launch from the active launcher</td></tr>
+            <tr><td>Arrow keys</td><td>steer the interceptor in flight</td></tr>
+            <tr><td><kbd>A</kbd> / <kbd>D</kbd></td><td>move the launcher</td></tr>
+            <tr><td><kbd>Tab</kbd></td><td>change fire mode</td></tr>
+            <tr><td><kbd>R</kbd></td><td>resupply</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="bots">
+  <div class="wrap">
+    <h2><span data-n="bots">8</span> bots that play like people</h2>
+    <p class="sub">Add <code>?bot=&lt;name&gt;</code> to the co-op address and that browser tab plays by itself. A bot reads the same snapshots a person sees and sends the same key presses, so the server cannot tell the two apart. They are eight settings of one small loop in <code>mp.html</code>, tuned so that between them they press every button in the game.</p>
+    <table class="bots">
+      <thead><tr><th>Bot</th><th>Plays like</th></tr></thead>
+      <tbody>
+        <tr><td><code>trigger</code></td><td>fires constantly, aims loosely, uses up the ammunition</td></tr>
+        <tr><td><code>deadeye</code></td><td>waits, lines up, steers by hand, rarely misses</td></tr>
+        <tr><td><code>gremlin</code></td><td>changes target and fire mode at random</td></tr>
+        <tr><td><code>dozer</code></td><td>slow to decide, slow to move, takes naps</td></tr>
+        <tr><td><code>sloppy</code></td><td>over-fires and switches targets a lot</td></tr>
+        <tr><td><code>squint</code></td><td>only shoots at what the radar can see</td></tr>
+        <tr><td><code>nomad</code></td><td>roams the whole field, firing as it goes</td></tr>
+        <tr><td><code>camel</code></td><td>holds the middle and calls in the camels</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="fabric">
+  <div class="wrap">
+    <h2>A traffic generator with a scoreboard</h2>
+    <p class="sub">The <code>/demo</code> page fills the room with all eight bots from one tab and plays until you close it. With the publisher switched on (<code>ZENOH_PUBLISH=1</code>) on a goatnet, the game publishes these keys, and the command in the page header tails them. On a laptop the publisher is off and the game plays on its own.</p>
+    <figure style="margin-bottom:28px">
+      <img src="assets/media/airdefenders-fabric-demo-eight-bots.png" width="1440" height="810" loading="lazy"
+        alt="The Air Defenders fabric demo page: a header with a goat sub command for the example goatnet zagros, and a four-by-two grid of game views labeled trigger, deadeye, gremlin, dozer, sloppy, squint, nomad and camel, all playing in the same room">
+      <figcaption>Real capture, 1440 × 810: the <code>/demo</code> page 30 seconds after it opened, for the example goatnet <code>zagros</code>.</figcaption>
+    </figure>
+    <table>
+      <thead><tr><th>Key</th><th>Published when</th></tr></thead>
+      <tbody>
+        <tr><td><code>airdefenders/&lt;site&gt;/radar/detection/v1</code></td><td>a radar sees a drone</td></tr>
+        <tr><td><code>airdefenders/&lt;site&gt;/missile/fired/v1</code></td><td>a launcher fires</td></tr>
+        <tr><td><code>airdefenders/&lt;site&gt;/missile/intercept/v1</code></td><td>an interceptor hits</td></tr>
+        <tr><td><code>airdefenders/&lt;site&gt;/shahed/impact/v1</code></td><td>a drone reaches the ground</td></tr>
+      </tbody>
+    </table>
+    <p class="sub" style="margin-top:14px">Schemas: <a href="https://github.com/USAREUR-AF/goatrodeo/tree/main/ops/zenoh-trial-peers/airdefenders-schemas">ops/zenoh-trial-peers/airdefenders-schemas/</a>. Runbook: <a href="https://github.com/USAREUR-AF/goatrodeo/blob/main/docs/operations/airdefenders-zenoh-demo.md">airdefenders-zenoh-demo.md</a>.</p>
+  </div>
+</section>
+
+<section id="run">
+  <div class="wrap">
+    <h2>Run it</h2>
+    <p class="sub">You need Go (the version in <code>go.mod</code>) and a browser. <code>DB_PATH</code> puts the high-score database in a local file, <code>AD_DEMO_UNGATED=1</code> opens the bot demo page without a sign-in, and <code>SITE_ID</code> is the name the game would publish under.</p>
+    <div class="two">
+      <div>
+        <h3>On a laptop</h3>
+<pre class="term"><span class="p">$ </span>git clone https://github.com/USAREUR-AF/goatrodeo
+<span class="p">$ </span>cd goatrodeo/ops/serve/airdefenders
+<span class="p">$ </span>DB_PATH=./local-scores.db AD_DEMO_UNGATED=1 \
+    SITE_ID=zagros go run .</pre>
+        <table>
+          <thead><tr><th>Open</th><th>For</th></tr></thead>
+          <tbody>
+            <tr><td><code>localhost:8095/</code></td><td>solo</td></tr>
+            <tr><td><code>localhost:8095/mp</code></td><td>co-op</td></tr>
+            <tr><td><code>localhost:8095/mp?bot=deadeye</code></td><td>a bot</td></tr>
+            <tr><td><code>localhost:8095/demo</code></td><td>all eight bots</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <h3>On a goatnet</h3>
+        <p class="sub" style="margin-bottom:16px">The role and playbooks in <code>ops/ansible/</code> deploy Air Defenders behind the goatnet's sign-in, from an assembled goatcore tree with this repository's <code>ops/</code> copied over it. The image is built by <code>airdefenders-image.yml</code> and published as <code>ghcr.io/usareur-af/airdefenders</code>.</p>
+        <h3>Add a game or a toy</h3>
+        <p class="sub" style="margin-bottom:0">Two house rules: it runs on a laptop with the fabric switched off, and it publishes something real when the fabric is on. Air Defenders is the pattern to copy: the service in <code>ops/serve/&lt;name&gt;/</code>, its schemas in <code>ops/zenoh-trial-peers/</code>, its captures and how they were made in <code>docs/media/</code>. Read <a href="https://github.com/USAREUR-AF/goatrodeo/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a> first.</p>
+      </div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>goatrodeo · Apache License 2.0; public domain in the U.S. (<a href="https://github.com/USAREUR-AF/goatrodeo/blob/main/INTENT.md">INTENT.md</a>)</span>
+    <span><a href="https://github.com/USAREUR-AF/goatrodeo">GitHub</a> · <a href="https://github.com/USAREUR-AF/goatcore">goatcore</a> · <a href="https://github.com/USAREUR-AF/goatstuff">goatstuff</a> · <a href="https://github.com/USAREUR-AF/goatdocs">goatdocs</a></span>
+  </div>
+</footer>
+
+<script>
+(function () {
+  document.querySelectorAll('[data-copy]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var done = function () { b.textContent = 'Copied'; setTimeout(function () { b.textContent = 'Copy'; }, 1600); };
+      if (navigator.clipboard) navigator.clipboard.writeText(b.getAttribute('data-copy')).then(done, function () {});
+    });
+  });
+  // "Play it here" swaps the capture for the real game, which is served beside this page.
+  var screen = document.getElementById('screen'), cab = document.getElementById('cabinet'), cap = document.getElementById('caption');
+  function play() {
+    if (!screen.querySelector('iframe')) {
+      var f = document.createElement('iframe');
+      f.src = 'play/'; f.title = 'Air Defenders, the real solo game'; f.setAttribute('allow', 'fullscreen');
+      screen.innerHTML = ''; screen.appendChild(f); cab.classList.add('playing');
+      f.addEventListener('load', function () { try { f.contentWindow.focus(); } catch (e) {} });
+      cap.innerHTML = 'The real solo game, the same file as <code>ops/serve/airdefenders/index.html</code>. Click it, then press Space. Scores stay in this browser. <a href="play/">Open it full size</a>.';
+    }
+    cab.scrollIntoView({ block: 'center' });
+  }
+  document.querySelectorAll('[data-play]').forEach(function (b) { b.addEventListener('click', play); });
+})();
+</script>
+</body>
+</html>
