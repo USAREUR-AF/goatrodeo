@@ -112,7 +112,11 @@ tr:last-child td { border-bottom: 0; }
 .bots td:first-child { white-space: nowrap; width: 1%; }
 .bots td:first-child code { overflow-wrap: normal; }
 td code { font-size: 14px; overflow-wrap: anywhere; }
-.term { background: var(--code-bg); color: var(--code-ink); border-radius: 6px; padding: 16px 18px; font: 14px/1.6 var(--mono); overflow-x: auto; white-space: pre; margin: 0 0 16px; }
+.term { background: var(--code-bg); color: var(--code-ink); border-radius: 6px; padding: 16px 18px; font: 14px/1.6 var(--mono); overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 16px; }
+/* a command shows whole: it wraps at spaces, continuation lines hang two characters in */
+.cmd pre .ln, .term .ln { display: block; padding-left: 2ch; text-indent: -2ch; }
+/* a word with a hyphen or slash moves to the next line whole, and breaks only if it alone is wider than the box */
+pre .ln .w { display: inline-block; max-width: 100%; text-indent: 0; }
 .term .p { color: #39f29a; user-select: none; }
 .two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 28px; }
 footer { margin-top: 96px; border-top: 1.5px solid var(--rule); padding: 28px 0 48px; color: var(--quiet); font-size: 15px; }
@@ -212,8 +216,8 @@ func (r *Room) run(ctx context.Context) {
         <a class="btn" href="https://github.com/USAREUR-AF/goatrodeo#readme">Docs</a>
       </div>
       <div class="cmd">
-        <pre><span class="p">$ </span>cd ops/serve/airdefenders
-<span class="p">$ </span>DB_PATH=./local-scores.db AD_DEMO_UNGATED=1 SITE_ID=zagros go run .</pre>
+        <pre data-box="command"><span class="ln"><span class="p">$ </span>cd <span class="w">ops/serve/airdefenders</span>
+</span><span class="ln"><span class="p">$ </span><span class="w">DB_PATH=./local-scores.db</span> AD_DEMO_UNGATED=1 SITE_ID=zagros go run .</span></pre>
         <button class="copy" type="button" data-copy="cd ops/serve/airdefenders && DB_PATH=./local-scores.db AD_DEMO_UNGATED=1 SITE_ID=zagros go run .">Copy</button>
       </div>
       <p class="cmd-note">From a clone of the repository; then open <code>http://localhost:8095/</code>.</p>
@@ -345,10 +349,10 @@ func (r *Room) run(ctx context.Context) {
     <div class="two">
       <div>
         <h3>On a laptop</h3>
-<pre class="term"><span class="p">$ </span>git clone https://github.com/USAREUR-AF/goatrodeo
-<span class="p">$ </span>cd goatrodeo/ops/serve/airdefenders
-<span class="p">$ </span>DB_PATH=./local-scores.db AD_DEMO_UNGATED=1 \
-    SITE_ID=zagros go run .</pre>
+<pre class="term" data-box="command"><span class="ln"><span class="p">$ </span>git clone <span class="w">https://github.com/USAREUR-AF/goatrodeo</span>
+</span><span class="ln"><span class="p">$ </span>cd <span class="w">goatrodeo/ops/serve/airdefenders</span>
+</span><span class="ln"><span class="p">$ </span><span class="w">DB_PATH=./local-scores.db</span> AD_DEMO_UNGATED=1 \
+</span><span class="ln">    SITE_ID=zagros go run .</span></pre>
         <table>
           <thead><tr><th>Open</th><th>For</th></tr></thead>
           <tbody>
