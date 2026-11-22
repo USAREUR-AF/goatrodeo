@@ -48,7 +48,7 @@ jobs:
       - name: Copy the game and captures in, and check the page against the tree
         run: python3 site/build.py
       - name: Leave out what is not part of the page
-        run: rm -f site/build.py site/README.md site/.gitignore
+        run: rm -f site/build.py site/fitcheck.py site/README.md site/.gitignore
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: site

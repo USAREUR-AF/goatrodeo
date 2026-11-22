@@ -15,6 +15,7 @@ python3 -m http.server 8000 --directory site           # look at it on http://lo
 | `index.html` | the page: markup, CSS and the few lines of script (copy button, "Play it here") |
 | `assets/icon.svg` | the tab icon |
 | `build.py` | copies in what the page shows but does not keep twice, then checks the page against the tree |
+| `fitcheck.py` | run by `build.py`: loads the page in headless Chrome at 1440 and 390 px and fails when a box is cut off |
 | `.gitignore` | keeps the copied files out of git |
 | `play/index.html` | copied by `build.py` from `ops/serve/airdefenders/index.html`: the real solo game |
 | `assets/media/` | copied by `build.py` from `docs/media/`: the real captures; how each was made is in `docs/media/CAPTURES.md` |
@@ -38,3 +39,7 @@ something else. The page marks each with `data-n`.
 
 The code shown faintly behind the first screen is the room's tick loop; `build.py`
 fails if that text is no longer in `ops/serve/airdefenders/multiplayer.go`.
+
+## Command boxes
+
+Every `<pre>` on the page is marked `data-box="command"` or `data-box="output"`. A command box shows the whole command at any width: it wraps at spaces, each line of it a `<span class="ln">` with a hanging indent, and a word holding a hyphen or slash moves to the next line whole. Copy copies the command from the button's `data-copy`. `fitcheck.py` fails the build when a command box is cut off at 1440 or 390 px, an output box at 1440 px, or a `<pre>` carries no mark; with no Chrome it is skipped outside CI.
