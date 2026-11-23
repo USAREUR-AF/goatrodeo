@@ -2,6 +2,8 @@
 """The leak gate for pull requests: scan the lines a change adds, never print what matched.
 
     scan-diff.py --base <sha> --head <sha> [--repo <dir>] [--needles-file <file>]
+    scan-diff.py ... --messages [--text-env NAME=label ...]
+    scan-diff.py --text-file <file> [--needles-file <file>]
     scan-diff.py --self-test
 
 Reads the lines added between the merge base of <base> and <head> (git diff,
@@ -12,12 +14,18 @@ and fails on two classes:
                  in this repository: it arrives in the environment variable
                  GOAT_LEAK_NEEDLES (an encrypted repository secret: base64 of
                  the newline-separated list, gzip-compressed or plain), or in
-                 --needles-file. Matching is case-insensitive substring.
+                 --needles-file. Matching is case-insensitive substring; a
+                 name written with a leading "=" matches as a whole word only
+                 (letters and digits bound a word), so it may be short.
   shapes         material that is never right in this repository whatever its
                  value: a private-key block (PEM, OpenSSH, encrypted, PGP),
                  AWS access key ids (long-term and temporary), GitHub, Slack
                  and Google API tokens, JWTs, agent-session URLs,
                  releasability markings.
+
+--messages also scans the commit messages (sign-off trailers left out), and
+--text-env scans the text of an environment variable (a title or a body).
+--text-file scans one text alone, without a diff.
 
 A line carrying `oss-allow: <reason>` is exempt from both classes, as in the
 export's own gate; each exemption is listed as a notice for the reviewer. A
@@ -75,7 +83,7 @@ def decode_needles(raw: str) -> list:
 
 def parse_needles(text: str) -> list:
     out = {ln.strip().lower() for ln in text.splitlines()}
-    return sorted((n for n in out if len(n) >= 4 and not n.startswith("#")), key=lambda s: (-len(s), s))
+    return sorted((n for n in out if (len(n) >= 4 or (n.startswith("=") and len(n) >= 3)) and not n.startswith("#")), key=lambda s: (-len(s), s))
 
 
 def load_needles(path):
@@ -160,9 +168,48 @@ def trie_regex(words) -> str:
     return emit(trie)
 
 
+class NeedleMatcher:
+    """finditer over both kinds of name: substring, and whole word (leading "=")."""
+
+    def __init__(self, needles):
+        plain = [n for n in needles if not n.startswith("=")]
+        words = [n[1:] for n in needles if n.startswith("=")]
+        self.res = []
+        if plain:
+            self.res.append(re.compile(trie_regex(plain)))
+        if words:
+            self.res.append(re.compile("(?<![a-z0-9])(?:" + trie_regex(words) + ")(?![a-z0-9])"))
+
+    def finditer(self, text):
+        for rx in self.res:
+            yield from rx.finditer(text)
+
+
+TRAILER = re.compile(r"^(signed-off-by|co-authored-by|reviewed-by|acked-by|reported-by):", re.I)
+
+
+def message_lines(repo: str, base: str, head: str):
+    """Yield (label, line_number, text) for the commit messages of base..head, without trailers."""
+    cmd = ["git", "-C", repo, "log", "--format=%x00%h%n%B", f"{base}..{head}"]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0:
+        sys.exit("leak-gate: git log failed: " + proc.stderr.decode("utf-8", "replace")[-400:])
+    for chunk in proc.stdout.decode("utf-8", "replace").split("\0"):
+        sha, _, body = chunk.partition("\n")
+        for i, text in enumerate(body.split("\n"), 1):
+            if text and not TRAILER.match(text):
+                yield f"commit message {sha}", i, text
+
+
+def text_lines(label: str, text: str):
+    for i, line in enumerate((text or "").splitlines(), 1):
+        if not TRAILER.match(line):
+            yield label, i, line
+
+
 def scan_paths(paths, needles):
     """Return hits in path names, each with the path redacted so no matched value is printed."""
-    needle_re = re.compile(trie_regex(needles)) if needles else None
+    needle_re = NeedleMatcher(needles) if needles else None
     hits = []
     for path in paths:
         found, spans = [], []
@@ -189,7 +236,7 @@ def scan_paths(paths, needles):
 
 
 def scan(lines, needles):
-    needle_re = re.compile(trie_regex(needles)) if needles else None
+    needle_re = NeedleMatcher(needles) if needles else None
     hits, exempt = [], []
     for path, lineno, text in lines:
         if skipped(path):
@@ -304,6 +351,10 @@ def self_test() -> int:
                             capture_output=True, text=True, env=env)
         if r2.returncode != 2:
             problems.append(f"no needle list: exit {r2.returncode}, want 2")
+    words = parse_needles("=qzx\nplainname\nabc\n")
+    thits, _ = scan(text_lines("t", "the QZX deploy\nxqzxy\nproc-qzx\na/qzx_9\nmyplainnames\nabc\nSigned-off-by: qzx"), words)
+    if [h[1] for h in thits] != [1, 3, 4, 5]:
+        problems.append(f"whole-word names: lines {[h[1] for h in thits]}, want [1, 3, 4, 5]")
     if problems:
         print("self-test FAILED: " + "; ".join(problems))
         return 1
@@ -317,19 +368,31 @@ def main() -> int:
     ap.add_argument("--head")
     ap.add_argument("--repo", default=".")
     ap.add_argument("--needles-file")
+    ap.add_argument("--messages", action="store_true")
+    ap.add_argument("--text-env", action="append", default=[], metavar="NAME=label")
+    ap.add_argument("--text-file")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
     if a.self_test:
         return self_test()
-    if not (a.base and a.head):
+    if not a.text_file and not (a.base and a.head):
         ap.error("--base and --head are required")
     needles = load_needles(a.needles_file)
     if not needles:
         print("leak-gate: no needle list. The repository secret GOAT_LEAK_NEEDLES is unset or empty; "
               "an owner sets it. The gate fails closed.", file=sys.stderr)
         return 2
+    if a.text_file:
+        with open(a.text_file, encoding="utf-8", errors="replace") as fh:
+            return report(scan(text_lines("text", fh.read()), needles), len(needles))
+    extra = list(message_lines(a.repo, a.base, a.head)) if a.messages else []
+    for spec in a.text_env:
+        name, _, label = spec.partition("=")
+        extra.extend(text_lines(label or name, os.environ.get(name, "")))
     hits, exempt = scan(added_lines(a.repo, a.base, a.head), needles)
     hits = scan_paths(added_paths(a.repo, a.base, a.head), needles) + hits
+    thits, texempt = scan(extra, needles)
+    hits, exempt = hits + thits, exempt + texempt
     return report((hits, exempt), len(needles))
 
 

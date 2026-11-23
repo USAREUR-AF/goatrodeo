@@ -16,7 +16,7 @@ name: leak-gate
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
 
 permissions:
   contents: read
@@ -48,9 +48,14 @@ jobs:
             git fetch --no-tags --quiet origin "${HEAD_SHA}"
           fi
 
-      - name: scan the added lines
+      - name: scan the added lines, the messages and the text
         env:
           GOAT_LEAK_NEEDLES: ${{ secrets.GOAT_LEAK_NEEDLES }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python3 .github/leak-gate/scan-diff.py --base "${BASE_SHA}" --head "${HEAD_SHA}"
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          python3 .github/leak-gate/scan-diff.py --base "${BASE_SHA}" --head "${HEAD_SHA}" --messages \
+            --text-env "PR_TITLE=title" --text-env "PR_BODY=body" --text-env "PR_BRANCH=branch name"
