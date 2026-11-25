@@ -98,6 +98,9 @@ const BTN = {
   switchLauncher: { x: GAME_W / 2 - 75, y: GAME_H - 115, w: 150, h: 40 },
 };
 // Title-screen-only button that navigates to the co-op multiplayer page.
+// Co-op needs the game server; a copy served without it (the browser demo on the
+// landing page) sets window.AD_COOP = false and the button is neither drawn nor clickable.
+const COOP = window.AD_COOP !== false;
 const BTN_MP_LINK = { x: GAME_W / 2 - 130, y: 590, w: 260, h: 44 };
 // TITLE-screen EDIT NAME button — small canvas hit-rect above the controls
 // block. Tap pops the nameInput overlay; commit on Enter / blur persists to
@@ -174,7 +177,7 @@ canvas.addEventListener('touchstart', e => {
     // advance is SPACE-only.
     if (state === TITLE) {
       if (inBtn(pt, BTN_EDIT_NAME)) { openNameEditorOnTitle(); continue; }
-      if (inBtn(pt, BTN_MP_LINK)) { window.location.href = '/mp'; return; }
+      if (COOP && inBtn(pt, BTN_MP_LINK)) { window.location.href = '/mp'; return; }
       if (ME.demo_admin && inBtn(pt, BTN_DEMO)) { openFabricDemo(); return; }
       continue;
     }
@@ -964,7 +967,7 @@ function updateMouse(e) {
 function handleMouseDown() {
   if (state === TITLE) {
     if (inBtn({ x: mouse.x, y: mouse.y }, BTN_EDIT_NAME)) { openNameEditorOnTitle(); return; }
-    if (inBtn({ x: mouse.x, y: mouse.y }, BTN_MP_LINK)) { window.location.href = '/mp'; return; }
+    if (COOP && inBtn({ x: mouse.x, y: mouse.y }, BTN_MP_LINK)) { window.location.href = '/mp'; return; }
     if (ME.demo_admin && inBtn({ x: mouse.x, y: mouse.y }, BTN_DEMO)) { openFabricDemo(); return; }
     return;
   }
@@ -2561,15 +2564,17 @@ function render() {
       ctx.fillText('PREVIEW MODE \u2014 starting at wave ' + cheatStartWave, canvas.width / 2, 565);
     }
     // Multiplayer link button \u2014 distinct visual style so it reads as "leave this page".
-    ctx.fillStyle = '#0a1a2a';
-    ctx.fillRect(BTN_MP_LINK.x, BTN_MP_LINK.y, BTN_MP_LINK.w, BTN_MP_LINK.h);
-    ctx.strokeStyle = '#44aaff';
-    ctx.lineWidth = 2;
-    ctx.strokeRect(BTN_MP_LINK.x, BTN_MP_LINK.y, BTN_MP_LINK.w, BTN_MP_LINK.h);
-    ctx.fillStyle = '#44aaff';
-    ctx.font = 'bold 16px "Courier New", monospace';
-    ctx.fillText('CO-OP MULTIPLAYER \u2192', canvas.width / 2, BTN_MP_LINK.y + 28);
-    ctx.lineWidth = 1;
+    if (COOP) {
+      ctx.fillStyle = '#0a1a2a';
+      ctx.fillRect(BTN_MP_LINK.x, BTN_MP_LINK.y, BTN_MP_LINK.w, BTN_MP_LINK.h);
+      ctx.strokeStyle = '#44aaff';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(BTN_MP_LINK.x, BTN_MP_LINK.y, BTN_MP_LINK.w, BTN_MP_LINK.h);
+      ctx.fillStyle = '#44aaff';
+      ctx.font = 'bold 16px "Courier New", monospace';
+      ctx.fillText('CO-OP MULTIPLAYER \u2192', canvas.width / 2, BTN_MP_LINK.y + 28);
+      ctx.lineWidth = 1;
+    }
     // Fabric demo trigger — rendered only for platform admins (ME.demo_admin).
     drawDemoButton(BTN_DEMO);
     ctx.textAlign = 'left';
