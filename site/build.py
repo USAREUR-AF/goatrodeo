@@ -4,7 +4,9 @@
   python3 site/build.py          # copy the game and the captures in, check the page
 
 Copies two things the page uses but does not keep a second copy of:
-  ops/serve/airdefenders/index.html  ->  site/play/index.html   (the real solo game)
+  ops/serve/airdefenders/index.html  ->  site/play/index.html   (the real solo game; its co-op
+                                                                 button goes to "Run it", since
+                                                                 Pages has no game server)
   docs/media/*.png, *.webp           ->  site/assets/media/       (the real captures)
 
 Then fails if a number the page states differs from the tree, or if the code
@@ -21,9 +23,24 @@ SITE = ROOT / "site"
 GAME = ROOT / "ops/serve/airdefenders"
 
 
+# On GitHub Pages there is no game server, so the title screen's co-op button,
+# which goes to the server's /mp page, would land on a 404. The published copy
+# sends it to the landing page's "Run it" section instead, which says how to
+# start the server that co-op needs.
+MP_LINK = "window.location.href = '/mp';"
+NO_SERVER = ("<script>function adCoopNeedsServer(){var u=new URL('../#run',location.href).href;"
+             "try{window.top.location.href=u}catch(e){location.href=u}}</script>\n")
+
+
 def copy():
     (SITE / "play").mkdir(exist_ok=True)
-    shutil.copyfile(GAME / "index.html", SITE / "play/index.html")
+    game = (GAME / "index.html").read_text()
+    if game.count(MP_LINK) != 2:
+        sys.exit(f"site/build.py: expected the co-op link {MP_LINK!r} twice in ops/serve/airdefenders/index.html, "
+                 f"found {game.count(MP_LINK)}; update MP_LINK so the published copy does not link to a missing /mp")
+    game = game.replace(MP_LINK, "adCoopNeedsServer();")
+    head = game.index("<head>") + len("<head>")
+    (SITE / "play/index.html").write_text(game[:head] + "\n" + NO_SERVER + game[head:])
     media = SITE / "assets/media"
     media.mkdir(parents=True, exist_ok=True)
     for f in sorted((ROOT / "docs/media").iterdir()):
