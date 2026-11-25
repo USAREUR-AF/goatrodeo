@@ -74,6 +74,9 @@ code, pre, kbd { font-family: var(--mono); }
 .screen { position: relative; aspect-ratio: 640 / 560; border-radius: 6px; overflow: hidden; background: var(--screen); }
 .screen img, .screen iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
 .screen iframe { background: var(--screen); }
+.playlayer { position: fixed; inset: 0; z-index: 50; background: #000; }
+.playlayer iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
+.playlayer .close { position: absolute; top: calc(12px + env(safe-area-inset-top, 0px)); right: calc(12px + env(safe-area-inset-right, 0px)); z-index: 1; }
 .playover { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 2; }
 .playover .btn { background: rgba(5, 7, 15, .82); color: #39f29a; border-color: #39f29a; }
 .cabinet.playing::after { display: none; }
@@ -389,18 +392,22 @@ func (r *Room) run(ctx context.Context) {
       if (navigator.clipboard) navigator.clipboard.writeText(b.getAttribute('data-copy')).then(done, function () {});
     });
   });
-  // "Play it here" swaps the capture for the real game, which is served beside this page.
-  var screen = document.getElementById('screen'), cab = document.getElementById('cabinet'), cap = document.getElementById('caption');
+  // "Play it here" opens the real solo game, served beside this page, over the whole window.
+  var layer = null;
+  function close() { if (layer) { layer.remove(); layer = null; document.body.style.overflow = ''; } }
   function play() {
-    if (!screen.querySelector('iframe')) {
-      var f = document.createElement('iframe');
-      f.src = 'play/'; f.title = 'Air Defenders, the real solo game'; f.setAttribute('allow', 'fullscreen');
-      screen.innerHTML = ''; screen.appendChild(f); cab.classList.add('playing');
-      f.addEventListener('load', function () { try { f.contentWindow.focus(); } catch (e) {} });
-      cap.innerHTML = 'The real solo game, the same file as <code>ops/serve/airdefenders/index.html</code>. Click it, then press Space. Scores stay in this browser. <a href="play/">Open it full size</a>.';
-    }
-    cab.scrollIntoView({ block: 'center' });
+    if (layer) return;
+    layer = document.createElement('div'); layer.className = 'playlayer';
+    layer.innerHTML = '<iframe src="play/" title="Air Defenders, the real solo game" allow="fullscreen"></iframe>'
+      + '<button class="btn close" type="button">Close</button>';
+    layer.querySelector('.close').addEventListener('click', close);
+    document.body.appendChild(layer); document.body.style.overflow = 'hidden';
+    var f = layer.querySelector('iframe');
+    f.addEventListener('load', function () { try { f.contentWindow.focus(); } catch (e) {} });
   }
+  // The game's co-op button sends the page to #run (co-op needs the server); close the player then.
+  window.addEventListener('hashchange', close);
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') close(); });
   document.querySelectorAll('[data-play]').forEach(function (b) { b.addEventListener('click', play); });
 })();
 </script>
