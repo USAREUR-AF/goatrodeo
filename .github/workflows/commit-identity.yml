@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: 2026 U.S. Federal Government (in countries where recognized)
+# SPDX-License-Identifier: Apache-2.0
+#
+# commit-identity: a pull request that would publish a personal mailbox in
+# commit history is stopped once, until its owner fixes it or comments
+# `/email-ok` (ADR 1276 in USAREUR-AF/goatcore). The check itself lives in
+# goatcore; this repository carries only this file.
+#
+# The verdict is the commit status `commit-identity` on the pull request's
+# head commit. The job below ends green unless it could not decide, so a
+# comment can clear the status without a new push. The check looks forward
+# only: commits made before its start time are not read.
+#
+# pull_request_target and issue_comment run this file as it is on the default
+# branch. The pull request's code is never checked out, built or run: the
+# script reads commit metadata and comments from the API, and the only
+# checkout is of the check itself from goatcore main. No value from the event
+# is interpolated into a shell line.
+name: commit-identity
+
+on:
+  pull_request_target:
+    # `labeled` lets an owner make the check run on a pull request that was
+    # opened before the ruleset existed, without a push: add any label.
+    types: [opened, synchronize, reopened, ready_for_review, labeled]
+  issue_comment:
+    types: [created, deleted]
+  merge_group:
+
+permissions:
+  contents: read
+  statuses: write        # the verdict
+  pull-requests: write   # one comment that says what to do
+  issues: write          # the same comment, through the issues API
+
+concurrency:
+  group: commit-identity-${{ github.event.pull_request.number || github.event.issue.number || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  commit-identity:
+    name: decide
+    # A comment event runs only for a pull request and only for the two
+    # phrases; every other event runs the whole check.
+    if: >-
+      github.event_name != 'issue_comment'
+      || (github.event.issue.pull_request
+          && startsWith(github.event.comment.body, '/email-ok'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: the check, from goatcore main
+        # nosemgrep: yaml.github-actions.security.pull-request-target-code-checkout.pull-request-target-code-checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: USAREUR-AF/goatcore
+          ref: main
+          path: .goatcore-identity
+          sparse-checkout: .github/commit-identity
+          persist-credentials: false
+
+      - name: decide
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          MERGE_GROUP_SHA: ${{ github.event.merge_group.head_sha }}
+        run: python3 .goatcore-identity/.github/commit-identity/check.py
